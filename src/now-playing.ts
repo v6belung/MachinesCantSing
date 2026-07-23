@@ -5,6 +5,7 @@ export interface ArtistFlag {
   artist_id: string;
   name: string;
   is_flagged: boolean | null;
+  confidence: number | null;
 }
 
 export interface NowPlayingChanged {
@@ -21,11 +22,16 @@ export interface RecentClassification {
   earliest_release_date: string | null;
 }
 
-function badge(isFlagged: boolean | null): string {
+// Mirrors classifier::LOW_CONFIDENCE_MAX on the Rust side -- keep both in sync.
+const LOW_CONFIDENCE_MAX = 0.25;
+
+function badge(isFlagged: boolean | null, confidence: number | null): string {
   if (isFlagged === null) return `<span class="badge pending">pending</span>`;
-  return isFlagged
-    ? `<span class="badge flagged">flagged</span>`
-    : `<span class="badge clear">clear</span>`;
+  if (isFlagged) return `<span class="badge flagged">flagged</span>`;
+  if (confidence !== null && confidence <= LOW_CONFIDENCE_MAX) {
+    return `<span class="badge unresolved">unresolved</span>`;
+  }
+  return `<span class="badge clear">clear</span>`;
 }
 
 function renderNowPlaying(state: NowPlayingChanged | null): void {
@@ -40,7 +46,10 @@ function renderNowPlaying(state: NowPlayingChanged | null): void {
 
   titleEl.textContent = state.track_title;
   listEl.innerHTML = state.artists
-    .map((a) => `<li>${badge(a.is_flagged)} ${escapeHtml(a.name)}</li>`)
+    .map(
+      (a) =>
+        `<li>${badge(a.is_flagged, a.confidence)} ${escapeHtml(a.name)}</li>`,
+    )
     .join("");
 }
 
@@ -49,7 +58,7 @@ function renderRecent(rows: RecentClassification[]): void {
   listEl.innerHTML = rows
     .map(
       (r) =>
-        `<li>${badge(r.is_flagged)} ${escapeHtml(r.artist_name)}</li>`,
+        `<li>${badge(r.is_flagged, r.confidence)} ${escapeHtml(r.artist_name)}</li>`,
     )
     .join("");
 }

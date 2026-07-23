@@ -24,6 +24,11 @@ impl Confidence {
     }
 }
 
+/// Any stored confidence at or below this is the "Low" tier -- unresolved on iTunes, or
+/// resolved with zero albums. Exposed so `media`/`tray` can surface that distinctly from a
+/// confidently-checked "not flagged" verdict, without duplicating the tier's numeric value.
+pub const LOW_CONFIDENCE_MAX: f64 = 0.25;
+
 pub struct ClassifyRequest {
     pub artist_id: String,
     pub artist_name: String,

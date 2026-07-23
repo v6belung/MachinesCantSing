@@ -54,3 +54,8 @@ li {
   background: #8f8f8f;
   color: white;
 }
+
+.badge.unresolved {
+  background: #e6a01e;
+  color: white;
+}

@@ -128,6 +128,10 @@ pub struct ArtistFlag {
     pub name: String,
     /// null/"pending" while a brand-new artist is still being classified.
     pub is_flagged: Option<bool>,
+    /// null while pending; otherwise the stored confidence (docs/phase0-plan.md §3.2).
+    /// `is_flagged == Some(false)` with a low confidence means "unresolved on iTunes," not
+    /// "confidently checked and clear" -- see `classifier::LOW_CONFIDENCE_MAX`.
+    pub confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,11 +190,15 @@ impl MediaMonitor {
         for name in &candidates {
             let id = artist_id(name);
             let known = self.db.get_classification(&id).ok().flatten();
-            let is_flagged = known.map(|row| row.is_flagged);
+            let (is_flagged, confidence) = match &known {
+                Some(row) => (Some(row.is_flagged), row.confidence),
+                None => (None, None),
+            };
             artists.push(ArtistFlag {
                 artist_id: id.clone(),
                 name: name.clone(),
                 is_flagged,
+                confidence,
             });
 
             if is_flagged.is_none() && self.mark_in_flight(&id) {
@@ -243,6 +251,7 @@ impl MediaMonitor {
         };
         if let Ok(Some(row)) = self.db.get_classification(artist_id) {
             artist.is_flagged = Some(row.is_flagged);
+            artist.confidence = row.confidence;
         }
         let snapshot = Some(state.clone());
         drop(guard);
