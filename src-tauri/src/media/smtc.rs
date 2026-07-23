@@ -193,13 +193,14 @@ fn read_now_playing(session: &Session) -> anyhow::Result<Option<RawNowPlaying>> 
     }))
 }
 
-/// Spotify's own SMTC formatting convention for multi-artist credits is "A, B & C" --
-/// split on that rather than a generic delimiter set, since a blind comma-split would
-/// mangle single-artist names that legitimately contain a comma.
+/// Spotify's own SMTC formatting convention for multi-artist credits is a plain
+/// comma-separated list ("A, B, C") -- it does not use "&" as a delimiter, so splitting
+/// on that alone would mangle a real artist name containing one (e.g. "Earth, Wind &
+/// Fire" would become three fake artists). The whole-line candidate in
+/// `media::candidate_names` is the safety net for the comma case itself.
 fn split_artists(artist: &str) -> Vec<String> {
     artist
         .split(", ")
-        .flat_map(|part| part.split(" & "))
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)

@@ -156,7 +156,60 @@ fn summarize(state: Option<&NowPlayingChanged>) -> (String, String, String, Tray
         ("Not flagged".to_string(), TrayState::Clear)
     };
     let track_text = format!("{} — {}", state.track_title, names);
-    let tooltip = format!("{track_text}\n{status_text}");
+    let tooltip = build_tooltip(&track_text, &status_text);
 
     (track_text, status_text, tooltip, tray_state)
+}
+
+/// Windows tray tooltips are capped at 128 UTF-16 code units (`NOTIFYICONDATA::szTip`); a
+/// long track/artist line would otherwise silently truncate the tail of the string, which is
+/// exactly the "Flagged" status line since it's written last. Reserve room for `status_text`
+/// in full and truncate `track_text` instead -- the status is the one thing that must never
+/// be cut off.
+fn build_tooltip(track_text: &str, status_text: &str) -> String {
+    const MAX_UTF16_LEN: usize = 127; // 128-length buffer, minus the NUL terminator.
+
+    let suffix = format!("\n{status_text}");
+    let suffix_len = suffix.encode_utf16().count();
+    let budget = MAX_UTF16_LEN.saturating_sub(suffix_len);
+
+    if track_text.encode_utf16().count() <= budget {
+        return format!("{track_text}{suffix}");
+    }
+
+    let ellipsis_budget = budget.saturating_sub(1); // room for the trailing "…"
+    let mut truncated = String::new();
+    let mut len = 0usize;
+    for c in track_text.chars() {
+        let w = c.len_utf16();
+        if len + w > ellipsis_budget {
+            break;
+        }
+        len += w;
+        truncated.push(c);
+    }
+    truncated.push('…');
+
+    format!("{truncated}{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_tooltip_is_unchanged() {
+        assert_eq!(
+            build_tooltip("Song — Artist", "Not flagged"),
+            "Song — Artist\nNot flagged"
+        );
+    }
+
+    #[test]
+    fn long_track_text_is_truncated_but_status_survives_in_full() {
+        let long_track = "A ".repeat(80) + "— Artist With A Very Long Name Indeed";
+        let tooltip = build_tooltip(&long_track, "Flagged: possible AI artist");
+        assert!(tooltip.ends_with("\nFlagged: possible AI artist"));
+        assert!(tooltip.encode_utf16().count() <= 127);
+    }
 }
