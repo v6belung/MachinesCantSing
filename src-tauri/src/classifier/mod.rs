@@ -1,4 +1,4 @@
-use chrono::{Months, NaiveDate, Utc};
+use chrono::{NaiveDate, Utc};
 
 use crate::db::Db;
 use crate::db::artist_classification::NewClassification;
@@ -65,32 +65,33 @@ fn is_release_burst(dates: &[NaiveDate]) -> bool {
     (latest - earliest).num_days() <= BURST_MAX_SPAN_DAYS
 }
 
-/// How recently an artist must have debuted, relative to *today*, to still count as
-/// suspiciously new. Combined with `AI_CAPABILITY_FLOOR` below rather than used alone: a fixed
-/// floor by itself would keep widening forever as real time passes, eventually flagging real
-/// artists who've been legitimately active for years just because they debuted after the
-/// floor date. Both bounds are maintenance-free: the floor is a historical fact that doesn't
-/// move, and this window is computed from `today` rather than hardcoded to a year.
-const RECENCY_WINDOW_MONTHS: u32 = 24;
-
 /// AI music tools capable of passing as human only matured from roughly Suno v3 (March 2024)
 /// / Udio (April 2024) onward -- a placeholder as rough as the rest of this heuristic stack,
 /// not a rigorously sourced threshold, but a fixed historical floor that doesn't need updating
 /// as further years pass, unlike an enumerated year list (`year() in {2025, 2026}` needing
 /// "2027" added by hand next year).
+///
+/// This used to be paired with a trailing window measured from `today` ("debuted within the
+/// last 24 months"), on the theory that a real artist active for years without corroboration
+/// should eventually stop looking suspicious. That reasoning assumed classification happens
+/// continuously, re-checking artists as time passes. It doesn't: `classify` runs exactly once
+/// per artist, at whatever moment this listener's library first plays them (media/mod.rs,
+/// gated on `get_classification` returning `None`). So "today" was really "whenever this
+/// listener happened to press play" -- unrelated to the artist's actual debut-to-now gap, and
+/// identical to whatever "now" the live iTunes/MusicBrainz lookups below already reflect. Worse,
+/// aging out of that window also skipped the MusicBrainz corroboration attempt (gated on
+/// `new_artist`), so a late first play was a free pass on the one real verification step too.
+/// The floor alone is timeless and doesn't depend on when a listener happens to press play, so
+/// it's the only bound worth keeping; corroboration/burst/invisible-everywhere carry the rest.
 fn ai_capability_floor() -> NaiveDate {
     NaiveDate::from_ymd_opt(2024, 3, 1).expect("valid hardcoded date")
 }
 
-/// True if `earliest` falls both after the AI-capability floor and within the trailing
-/// recency window measured from `today`. Confirmed live this catches real cases the
-/// year()-based check missed entirely (e.g. "END EVE", earliest 2024-09-20, a confirmed AI
-/// artist that the old 2025/2026-only check let straight through).
-fn is_new_enough_to_flag(earliest: NaiveDate, today: NaiveDate) -> bool {
-    let rolling_cutoff = today
-        .checked_sub_months(Months::new(RECENCY_WINDOW_MONTHS))
-        .expect("today is always a sane, recent date");
-    earliest >= ai_capability_floor() && earliest >= rolling_cutoff
+/// True if `earliest` falls after the AI-capability floor. Confirmed live this catches real
+/// cases the old year()-based check missed entirely (e.g. "END EVE", earliest 2024-09-20, a
+/// confirmed AI artist that the old 2025/2026-only check let straight through).
+fn is_new_enough_to_flag(earliest: NaiveDate) -> bool {
+    earliest >= ai_capability_floor()
 }
 
 /// Title markers for the AI-cover-mashup convention observed across multiple confirmed-AI
@@ -237,7 +238,7 @@ pub async fn classify(
     // overriding `burst`, a stronger and more independent signal): a real, distinct other
     // artist choosing to credit this name as a collaborator is hard to fake cheaply, unlike
     // self-published volume.
-    let new_artist = earliest.is_some_and(|d| is_new_enough_to_flag(d, Utc::now().date_naive()));
+    let new_artist = earliest.is_some_and(is_new_enough_to_flag);
     let itunes_unresolved = matches!(method, MatchMethod::Unresolved);
 
     // Worth the extra MusicBrainz round-trip in two cases: iTunes would otherwise flag on
@@ -369,33 +370,23 @@ mod tests {
     }
 
     #[test]
-    fn end_eve_case_is_now_caught_by_the_recency_window() {
+    fn end_eve_case_is_caught_by_the_floor_check() {
         // Confirmed live: "END EVE" (earliest 2024-09-20) is a real AI artist that the old
-        // year()-in-{2025,2026} check let through entirely. The new floor+rolling-window
-        // check must catch it as of a "today" shortly after its debut.
-        assert!(is_new_enough_to_flag(
-            date("2024-09-20"),
-            date("2026-07-23")
-        ));
+        // year()-in-{2025,2026} check let through entirely. The floor check must catch it.
+        assert!(is_new_enough_to_flag(date("2024-09-20")));
     }
 
     #[test]
     fn before_ai_capability_floor_is_never_new_enough() {
-        // Even measured against a "today" right next to it, a debut before the floor doesn't
-        // count -- the floor rules out anything that predates capable AI tools at all.
-        assert!(!is_new_enough_to_flag(
-            date("2024-02-29"),
-            date("2024-03-15")
-        ));
+        assert!(!is_new_enough_to_flag(date("2024-02-29")));
     }
 
     #[test]
-    fn recency_window_ages_out_old_debuts_as_today_advances() {
-        let debut = date("2024-09-20");
-        assert!(is_new_enough_to_flag(debut, date("2026-07-23")));
-        // Same debut, much later "today": more than 24 months have passed, so it should no
-        // longer count as suspiciously new even though it's still after the floor.
-        assert!(!is_new_enough_to_flag(debut, date("2030-01-01")));
+    fn does_not_age_out_no_matter_how_long_ago_it_debuted() {
+        // Unlike the old trailing-window design, a debut just after the floor stays "new
+        // enough to flag" forever -- there's no re-evaluation to age it out of, since
+        // classification runs exactly once per artist at first play.
+        assert!(is_new_enough_to_flag(date("2024-09-20")));
     }
 
     fn entry(release_date: &str, artist_name: Option<&str>) -> albums::AlbumEntry {

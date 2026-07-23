@@ -34,15 +34,14 @@ point.
   into the verdict:
   - An artist credited literally as "Suno" or "Udio" (some AI uploads never
     get renamed) is an instant flag.
-  - An artist whose earliest release is recent enough to still look
-    suspiciously new — within the last two years, and never earlier than
-    March 2024 (roughly when AI music tools got good enough to matter) —
+  - An artist whose earliest release falls after March 2024 (roughly when AI
+    music tools got good enough to matter) still looks suspiciously new and
     is flagged *unless* something corroborates them as real: a different,
     established artist crediting them as a featured collaborator, or a
     MusicBrainz entry with a documented life-span or external links
-    (official site, socials, Discogs, Songkick/Bandsintown/setlist.fm).
-    Both bounds move on their own as time passes — nothing here needs
-    updating by hand.
+    (official site, socials, Discogs, Songkick/Bandsintown/setlist.fm). This
+    doesn't fade with age — since every artist is checked only once, ever,
+    there's no later re-check for it to fade *during*.
   - A sudden burst of many releases in a short window is flagged regardless
     of age — a real artist's catalog rarely appears all at once.
   - An artist found on neither iTunes nor MusicBrainz at all is flagged —
