@@ -40,11 +40,46 @@ full of unseen artists drains gradually rather than bursting.
 `MediaBackend` trait so a Linux MPRIS backend can be added later without
 touching anything above it (see `src-tauri/src/media/mpris.rs`).
 
-## Requirements
+## Install (Windows)
 
-- **Windows 11** (SMTC-based; this build does not run on Linux/macOS yet)
-- The **native Spotify desktop app**, installed and running (not the web
-  player — that doesn't publish to SMTC)
+No Rust, no Node, no build tools required — just download and run:
+
+1. Go to [Releases](https://github.com/v6belung/MachinesCantSing/releases/latest)
+   and download the `.exe` installer for the latest version.
+2. Run it. It installs the app and starts it — look for the icon in your
+   system tray (it may be hidden in the overflow arrow the first time; drag
+   it onto the visible taskbar to keep it there).
+3. Open Spotify (the native desktop app, not the web player) and play
+   something. The icon updates once the currently playing artist has been
+   classified.
+
+You'll need the **native Spotify desktop app** running — the icon just stays
+idle if Spotify isn't open, and this only works on **Windows 11** (SMTC-based)
+for now. No API keys, no `.env` file, no accounts to configure — that's the
+point.
+
+The installer is unsigned (no code-signing certificate yet), so Windows
+SmartScreen may warn on first run — "More info" → "Run anyway".
+
+## Versioning & releases
+
+Tags of the form `vX.Y.Z` on this repo trigger
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which
+builds the Windows installer and publishes it as a GitHub Release. The
+version lives in three places that must stay in sync: `package.json`,
+`src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+
+To cut a release:
+
+```powershell
+npm run release -- 0.2.0   # bumps all three files, commits, tags
+git push && git push origin v0.2.0
+```
+
+## Development
+
+Building from source requires:
+
 - [Rust](https://rustup.rs/) (stable toolchain, MSVC)
 - [Node.js](https://nodejs.org/) 20+ (LTS recommended) and npm
 - **Visual Studio Build Tools** with the "Desktop development with C++"
@@ -52,10 +87,6 @@ touching anything above it (see `src-tauri/src/media/mpris.rs`).
   ```powershell
   winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
   ```
-
-No API keys, no `.env` file, no accounts to configure — that's the point.
-
-## Setup
 
 ```powershell
 git clone https://github.com/v6belung/MachinesCantSing.git
@@ -73,7 +104,7 @@ This starts the Vite dev server for the (hidden-by-default) status window
 and launches the Tauri app. Open Spotify and play something — after a few
 seconds the tray icon should update. Right-click it for the menu.
 
-### Build a release binary
+### Build a release binary locally
 
 ```powershell
 npm run tauri build
@@ -88,6 +119,15 @@ cd src-tauri
 cargo test
 cargo clippy
 ```
+
+### Dependency cooldown policy
+
+Newly published npm package versions haven't had time for the community to
+catch a compromised release, so this repo enforces a **7-day cooldown**:
+`npm run check:deps` (run in CI on every `package.json`/lockfile change)
+fails if any installed npm package version was published less than 7 days
+ago. If you need to bump a dependency, prefer the newest version that's
+already cleared the cooldown rather than the latest tag.
 
 ## Data storage
 

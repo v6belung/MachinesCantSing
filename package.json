@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release": "node scripts/release.mjs",
+    "check:deps": "node scripts/check-dep-age.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"
@@ -16,5 +18,8 @@
     "@tauri-apps/cli": "^2",
     "typescript": "^5",
     "vite": "^6"
+  },
+  "overrides": {
+    "postcss": "8.5.19"
   }
 }
