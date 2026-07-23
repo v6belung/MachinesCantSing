@@ -6,6 +6,11 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    watch: {
+      // Vite has no reason to watch Rust build output; without this, its watcher can
+      // race Cargo writing the .exe mid-compile and crash with EBUSY on Windows.
+      ignored: ["**/src-tauri/**"],
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {

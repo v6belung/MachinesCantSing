@@ -177,13 +177,16 @@ fn summarize(state: Option<&NowPlayingChanged>) -> (String, String, String, Tray
     (track_text, status_text, tooltip, tray_state)
 }
 
-/// Windows tray tooltips are capped at 128 UTF-16 code units (`NOTIFYICONDATA::szTip`); a
-/// long track/artist line would otherwise silently truncate the tail of the string, which is
-/// exactly the "Flagged" status line since it's written last. Reserve room for `status_text`
-/// in full and truncate `track_text` instead -- the status is the one thing that must never
-/// be cut off.
+/// `NOTIFYICONDATA::szTip` is a 128-WCHAR buffer, but the `tray-icon` crate never opts in to
+/// `NOTIFYICON_VERSION_4` / `NIF_SHOWTIP` (it doesn't set `uVersion` at all), so Windows falls
+/// back to the pre-Vista tooltip behavior: the shell displays only the first 64 characters of
+/// szTip and silently drops the rest, regardless of how much the buffer actually holds. A long
+/// track/artist line would otherwise truncate the tail of the string, which is exactly the
+/// "Flagged" status line since it's written last. Reserve room for `status_text` in full
+/// (within that real 64-char budget) and truncate `track_text` instead -- the status is the
+/// one thing that must never be cut off.
 fn build_tooltip(track_text: &str, status_text: &str) -> String {
-    const MAX_UTF16_LEN: usize = 127; // 128-length buffer, minus the NUL terminator.
+    const MAX_UTF16_LEN: usize = 63; // 64-char legacy szTip display limit, minus the NUL terminator.
 
     let suffix = format!("\n{status_text}");
     let suffix_len = suffix.encode_utf16().count();
@@ -279,6 +282,6 @@ mod tests {
         let long_track = "A ".repeat(80) + "— Artist With A Very Long Name Indeed";
         let tooltip = build_tooltip(&long_track, "Flagged: possible AI artist");
         assert!(tooltip.ends_with("\nFlagged: possible AI artist"));
-        assert!(tooltip.encode_utf16().count() <= 127);
+        assert!(tooltip.encode_utf16().count() <= 63);
     }
 }

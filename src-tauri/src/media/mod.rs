@@ -259,6 +259,20 @@ impl MediaMonitor {
     }
 
     fn emit_and_update_tray(&self, state: Option<NowPlayingChanged>) {
+        // Multi-artist flagging depends entirely on what the OS handed us in `artist_credit`
+        // (see `candidate_names`) -- if a collab track's flag looks wrong, the first thing to
+        // check is whether every credited artist actually made it into this list at all,
+        // before suspecting the OR-across-candidates logic itself.
+        if let Some(s) = &state {
+            log::info!(
+                "now-playing: track=\"{}\" candidates={:?}",
+                s.track_title,
+                s.artists
+                    .iter()
+                    .map(|a| (a.name.as_str(), a.is_flagged))
+                    .collect::<Vec<_>>()
+            );
+        }
         tray::update(&self.app_handle, state.as_ref());
         let _ = self.app_handle.emit("now-playing-changed", state);
     }
