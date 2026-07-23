@@ -64,6 +64,20 @@ jobs:
           while IFS= read -r tag; do
             if [ "$tag" != "$current_tag" ]; then
               echo "Deleting old release+tag: $tag"
-              gh release delete "$tag" --cleanup-tag --yes
+              # --cleanup-tag also deletes the underlying git ref, which 422s if that ref is
+              # already gone (confirmed live for v0.2.3: an orphaned release left over from
+              # before this automation existed, with no matching tag). The release itself still
+              # gets deleted in that case -- only the tag-ref cleanup call fails -- so a single
+              # 422 here isn't a real failure. Don't let it abort the loop via set -e; the
+              # end-state check below is the actual pass/fail gate, not each command's exit code.
+              if ! gh release delete "$tag" --cleanup-tag --yes; then
+                echo "::warning::Delete of $tag reported an error (often just an already-gone tag ref); continuing"
+              fi
             fi
           done <<< "$all_tags"
+
+          remaining=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          if [ "$remaining" != "$current_tag" ]; then
+            echo "::error::Cleanup didn't converge -- releases remaining: $remaining"
+            exit 1
+          fi
