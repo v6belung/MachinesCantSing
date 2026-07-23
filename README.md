@@ -47,10 +47,17 @@ point.
   (checking), green (not flagged), amber (couldn't be confidently checked),
   red (flagged). Hover it for the current track and status, or right-click
   for more detail and an optional history window.
+- Right-click the tray icon and check "Start with Windows" if you want the
+  app running automatically every time you log in — it's off by default.
 
 Nothing is sent anywhere except those iTunes/MusicBrainz lookups. A local,
 private database of past verdicts lives on your machine at
-`%APPDATA%\dev.v6belung.now-playing-flagger\`.
+`%APPDATA%\dev.v6belung.now-playing-flagger\`. Verdicts are permanent by
+design (an artist is only ever checked once), so if the app's detection
+logic improves in a later update, previously-seen artists keep their old
+verdict rather than getting re-checked automatically. To force everyone to
+be re-evaluated from scratch, close the app and delete that folder (or just
+the `.sqlite3` file inside it) before relaunching.
 
 This is a deliberately rough heuristic stack, not a verdict on whether an
 artist is really AI-generated — treat a flag as "worth a second look," not
