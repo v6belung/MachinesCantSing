@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{Months, NaiveDate, Utc};
 
 use crate::db::Db;
 use crate::db::artist_classification::NewClassification;
@@ -63,6 +63,34 @@ fn is_release_burst(dates: &[NaiveDate]) -> bool {
     let earliest = *dates.iter().min().expect("checked non-empty above");
     let latest = *dates.iter().max().expect("checked non-empty above");
     (latest - earliest).num_days() <= BURST_MAX_SPAN_DAYS
+}
+
+/// How recently an artist must have debuted, relative to *today*, to still count as
+/// suspiciously new. Combined with `AI_CAPABILITY_FLOOR` below rather than used alone: a fixed
+/// floor by itself would keep widening forever as real time passes, eventually flagging real
+/// artists who've been legitimately active for years just because they debuted after the
+/// floor date. Both bounds are maintenance-free: the floor is a historical fact that doesn't
+/// move, and this window is computed from `today` rather than hardcoded to a year.
+const RECENCY_WINDOW_MONTHS: u32 = 24;
+
+/// AI music tools capable of passing as human only matured from roughly Suno v3 (March 2024)
+/// / Udio (April 2024) onward -- a placeholder as rough as the rest of this heuristic stack,
+/// not a rigorously sourced threshold, but a fixed historical floor that doesn't need updating
+/// as further years pass, unlike an enumerated year list (`year() in {2025, 2026}` needing
+/// "2027" added by hand next year).
+fn ai_capability_floor() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2024, 3, 1).expect("valid hardcoded date")
+}
+
+/// True if `earliest` falls both after the AI-capability floor and within the trailing
+/// recency window measured from `today`. Confirmed live this catches real cases the
+/// year()-based check missed entirely (e.g. "END EVE", earliest 2024-09-20, a confirmed AI
+/// artist that the old 2025/2026-only check let straight through).
+fn is_new_enough_to_flag(earliest: NaiveDate, today: NaiveDate) -> bool {
+    let rolling_cutoff = today
+        .checked_sub_months(Months::new(RECENCY_WINDOW_MONTHS))
+        .expect("today is always a sane, recent date");
+    earliest >= ai_capability_floor() && earliest >= rolling_cutoff
 }
 
 /// Title markers for the AI-cover-mashup convention observed across multiple confirmed-AI
@@ -209,9 +237,7 @@ pub async fn classify(
     // overriding `burst`, a stronger and more independent signal): a real, distinct other
     // artist choosing to credit this name as a collaborator is hard to fake cheaply, unlike
     // self-published volume.
-    let new_artist = earliest
-        .map(|d| matches!(d.year(), 2025 | 2026))
-        .unwrap_or(false);
+    let new_artist = earliest.is_some_and(|d| is_new_enough_to_flag(d, Utc::now().date_naive()));
     let itunes_unresolved = matches!(method, MatchMethod::Unresolved);
 
     // Worth the extra MusicBrainz round-trip in two cases: iTunes would otherwise flag on
@@ -340,6 +366,36 @@ mod tests {
             date("2024-07-01"),
         ];
         assert!(!is_release_burst(&dates));
+    }
+
+    #[test]
+    fn end_eve_case_is_now_caught_by_the_recency_window() {
+        // Confirmed live: "END EVE" (earliest 2024-09-20) is a real AI artist that the old
+        // year()-in-{2025,2026} check let through entirely. The new floor+rolling-window
+        // check must catch it as of a "today" shortly after its debut.
+        assert!(is_new_enough_to_flag(
+            date("2024-09-20"),
+            date("2026-07-23")
+        ));
+    }
+
+    #[test]
+    fn before_ai_capability_floor_is_never_new_enough() {
+        // Even measured against a "today" right next to it, a debut before the floor doesn't
+        // count -- the floor rules out anything that predates capable AI tools at all.
+        assert!(!is_new_enough_to_flag(
+            date("2024-02-29"),
+            date("2024-03-15")
+        ));
+    }
+
+    #[test]
+    fn recency_window_ages_out_old_debuts_as_today_advances() {
+        let debut = date("2024-09-20");
+        assert!(is_new_enough_to_flag(debut, date("2026-07-23")));
+        // Same debut, much later "today": more than 24 months have passed, so it should no
+        // longer count as suspiciously new even though it's still after the floor.
+        assert!(!is_new_enough_to_flag(debut, date("2030-01-01")));
     }
 
     fn entry(release_date: &str, artist_name: Option<&str>) -> albums::AlbumEntry {
