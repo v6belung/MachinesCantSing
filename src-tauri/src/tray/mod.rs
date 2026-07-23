@@ -6,8 +6,33 @@ use tauri::{AppHandle, Manager};
 use crate::media::NowPlayingChanged;
 
 const TRAY_ID: &str = "main";
-const NEUTRAL_ICON: &[u8] = include_bytes!("../../icons/tray-neutral.png");
+/// Nothing playing.
+const IDLE_ICON: &[u8] = include_bytes!("../../icons/tray-neutral.png");
+/// At least one candidate artist still classifying.
+const PENDING_ICON: &[u8] = include_bytes!("../../icons/tray-pending.png");
+/// All candidates resolved, none flagged.
+const CLEAR_ICON: &[u8] = include_bytes!("../../icons/tray-clear.png");
+/// At least one candidate resolved flagged.
 const FLAGGED_ICON: &[u8] = include_bytes!("../../icons/tray-flagged.png");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayState {
+    Idle,
+    Pending,
+    Clear,
+    Flagged,
+}
+
+impl TrayState {
+    fn icon_bytes(self) -> &'static [u8] {
+        match self {
+            TrayState::Idle => IDLE_ICON,
+            TrayState::Pending => PENDING_ICON,
+            TrayState::Clear => CLEAR_ICON,
+            TrayState::Flagged => FLAGGED_ICON,
+        }
+    }
+}
 
 const ITEM_CURRENT_TRACK: &str = "current-track";
 const ITEM_FLAGGED_STATUS: &str = "flagged-status";
@@ -56,7 +81,7 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
     )?;
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(Image::from_bytes(NEUTRAL_ICON)?)
+        .icon(Image::from_bytes(IDLE_ICON)?)
         .menu(&menu)
         .tooltip("Now Playing — AI-Artist Flagger: idle")
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -80,18 +105,17 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
 }
 
 /// Called by `media::MediaMonitor` whenever the now-playing state changes. Swaps the tray
-/// icon between neutral/flagged -- that swap *is* the flagged signal (docs/phase0-plan.md
-/// §4.3) -- and refreshes the tooltip and the two label-only menu items.
+/// icon between idle/pending/clear/flagged -- that swap *is* the flagged signal
+/// (docs/phase0-plan.md §4.3) -- and refreshes the tooltip and the two label-only menu items.
 pub fn update(app: &AppHandle, state: Option<&NowPlayingChanged>) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
 
-    let (track_text, status_text, tooltip, flagged) = summarize(state);
+    let (track_text, status_text, tooltip, tray_state) = summarize(state);
 
     let _ = tray.set_tooltip(Some(tooltip.as_str()));
-    let icon_bytes = if flagged { FLAGGED_ICON } else { NEUTRAL_ICON };
-    if let Ok(image) = Image::from_bytes(icon_bytes) {
+    if let Ok(image) = Image::from_bytes(tray_state.icon_bytes()) {
         let _ = tray.set_icon(Some(image));
     }
 
@@ -101,13 +125,13 @@ pub fn update(app: &AppHandle, state: Option<&NowPlayingChanged>) {
     }
 }
 
-fn summarize(state: Option<&NowPlayingChanged>) -> (String, String, String, bool) {
+fn summarize(state: Option<&NowPlayingChanged>) -> (String, String, String, TrayState) {
     let Some(state) = state else {
         return (
             "Nothing playing".to_string(),
             String::new(),
             "Now Playing — AI-Artist Flagger: idle".to_string(),
-            false,
+            TrayState::Idle,
         );
     };
 
@@ -117,18 +141,22 @@ fn summarize(state: Option<&NowPlayingChanged>) -> (String, String, String, bool
         .map(|a| a.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    // Multi-artist tracks: flagged if any credited artist is flagged.
+    // Multiple candidates per track (whole credit line + each split artist, see
+    // media::candidate_names): flagged if *any* candidate is flagged.
     let flagged = state.artists.iter().any(|a| a.is_flagged == Some(true));
     let pending = state.artists.iter().any(|a| a.is_flagged.is_none());
-    let status_text = if pending {
-        "Classifying…".to_string()
+    let (status_text, tray_state) = if pending {
+        ("Classifying…".to_string(), TrayState::Pending)
     } else if flagged {
-        "Flagged: possible AI artist".to_string()
+        (
+            "Flagged: possible AI artist".to_string(),
+            TrayState::Flagged,
+        )
     } else {
-        "Not flagged".to_string()
+        ("Not flagged".to_string(), TrayState::Clear)
     };
     let track_text = format!("{} — {}", state.track_title, names);
     let tooltip = format!("{track_text}\n{status_text}");
 
-    (track_text, status_text, tooltip, flagged)
+    (track_text, status_text, tooltip, tray_state)
 }

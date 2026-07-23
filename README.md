@@ -16,21 +16,30 @@ covers how it works day-to-day and how to build/run it.
    keyboard's media keys. No network call, no Spotify account, no scopes.
    Track changes are pushed instantly via SMTC events.
 
-2. **Classify each new artist once.** The first time an artist is seen, its
-   name is looked up on the public, keyless **iTunes Search API**:
+2. **Classify each new artist once.** For a track's credited artist(s), two
+   kinds of names are checked — the raw, unsplit credit line (e.g. "Earth,
+   Wind & Fire") *and* each individually split name (e.g. "Earth", "Wind",
+   "Fire") — since splitting on Spotify's own "A, B & C" convention is a
+   heuristic that's wrong for any real artist whose name contains a comma or
+   an ampersand. Whichever of those turn out to be genuinely new gets looked
+   up on the public, keyless **iTunes Search API**:
    - Search grounded in the actual song playing (`artist + track title`) to
      avoid name collisions, falling back to a plain artist-name search.
    - Fetch that artist's full album list and take the earliest release date.
    - `is_flagged = earliest_release_date.year in {2025, 2026}`.
 
-   The verdict is written **once, permanently**, to a local SQLite database
+   Each verdict is written **once, permanently**, to a local SQLite database
    (`artist_classification` + `classification_evidence` tables). The same
-   artist is never re-classified — a repeat play costs zero network calls.
+   name is never re-classified — a repeat play costs zero network calls. A
+   track is flagged overall if *any* of its candidate names comes back
+   flagged.
 
-3. **Tray icon is the only UI surface.** The icon swaps between a neutral and
-   a flagged state; the tooltip and right-click menu show the current track,
-   artist(s), and flagged status. An optional status window (opened from the
-   tray) shows a small history of recent classifications.
+3. **Tray icon is the only UI surface**, with four states: gray (idle,
+   nothing playing), hourglass (a candidate is still being classified),
+   green (resolved, nothing flagged), red (resolved, flagged). The tooltip
+   and right-click menu show the current track, artist(s), and flagged
+   status. An optional status window (opened from the tray) shows a small
+   history of recent classifications.
 
 iTunes allows ~20 requests/min per IP, so lookups are serialized through a
 global rate limiter (~4s spacing) with backoff on 403/5xx — a fresh playlist

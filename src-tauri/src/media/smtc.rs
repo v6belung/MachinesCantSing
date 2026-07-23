@@ -188,6 +188,7 @@ fn read_now_playing(session: &Session) -> anyhow::Result<Option<RawNowPlaying>> 
     Ok(Some(RawNowPlaying {
         track_title: title,
         artist_names: split_artists(&artist),
+        artist_credit: artist,
         playback_status: status,
     }))
 }

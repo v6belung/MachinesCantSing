@@ -29,6 +29,12 @@ pub enum PlaybackStatus {
 #[derive(Debug, Clone)]
 pub struct RawNowPlaying {
     pub track_title: String,
+    /// The raw, unsplit artist credit exactly as reported by the OS (e.g. "Earth, Wind &
+    /// Fire"). Evaluated as its own candidate alongside `artist_names` below, since splitting
+    /// is a heuristic that's wrong for any real artist whose name itself contains "," or "&".
+    pub artist_credit: String,
+    /// Best-effort split into individual artist names (heuristic on Windows/SMTC; native on
+    /// Linux/MPRIS, which reports artists as a structured list already).
     pub artist_names: Vec<String>,
     // Part of the normalized event shape per docs/phase0-plan.md §2.1; Stopped is already
     // filtered to `None` by backends before this struct is built, so Playing vs Paused isn't
@@ -66,6 +72,54 @@ pub fn platform_backend() -> Box<dyn MediaBackend> {
 /// dedup cache -- no separate "seen" set needed.
 pub fn artist_id(artist_name: &str) -> String {
     format!("name:{}", normalize_artist_name(artist_name))
+}
+
+/// The names to classify for a track: the raw, unsplit credit line plus each individually
+/// split name, deduped by normalized identity. Evaluating both catches two different failure
+/// modes of the split heuristic -- a real artist whose name contains "," or "&" is still
+/// classified correctly under the whole-line entry even if the split mangles it, while a
+/// genuine collab still gets each participant classified individually. A track is flagged if
+/// *any* candidate resolves flagged (docs/phase0-plan.md's OR-across-candidates refinement).
+fn candidate_names(artist_credit: &str, artist_names: &[String]) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(artist_names.len() + 1);
+    let mut seen = HashSet::new();
+
+    for name in std::iter::once(artist_credit).chain(artist_names.iter().map(String::as_str)) {
+        if seen.insert(normalize_artist_name(name)) {
+            candidates.push(name.to_string());
+        }
+    }
+
+    candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whole_line_and_splits_are_both_candidates() {
+        let candidates = candidate_names(
+            "Earth, Wind & Fire",
+            &["Earth".to_string(), "Wind".to_string(), "Fire".to_string()],
+        );
+        assert_eq!(
+            candidates,
+            vec!["Earth, Wind & Fire", "Earth", "Wind", "Fire"]
+        );
+    }
+
+    #[test]
+    fn single_artist_track_has_no_duplicate_candidate() {
+        let candidates = candidate_names("Some Artist", &["Some Artist".to_string()]);
+        assert_eq!(candidates, vec!["Some Artist"]);
+    }
+
+    #[test]
+    fn single_artist_dedup_is_normalization_insensitive() {
+        let candidates = candidate_names("Beyoncé", &["beyonce".to_string()]);
+        assert_eq!(candidates, vec!["Beyoncé"]);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,8 +180,10 @@ impl MediaMonitor {
             return;
         };
 
-        let mut artists = Vec::with_capacity(raw.artist_names.len());
-        for name in &raw.artist_names {
+        let candidates = candidate_names(&raw.artist_credit, &raw.artist_names);
+
+        let mut artists = Vec::with_capacity(candidates.len());
+        for name in &candidates {
             let id = artist_id(name);
             let known = self.db.get_classification(&id).ok().flatten();
             let is_flagged = known.map(|row| row.is_flagged);
