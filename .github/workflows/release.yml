@@ -35,3 +35,35 @@ jobs:
           releaseBody: "Windows build. Download the `.exe` installer below, run it, and look for the tray icon."
           releaseDraft: false
           prerelease: false
+
+      # Keeps exactly one release/tag around: the one this run just published. Runs only if
+      # the step above succeeded (the default for a GitHub Actions job), so there's never a
+      # window where cleanup runs but no new release exists. Deliberately reads the version
+      # from tauri.conf.json rather than github.ref_name, for the same reason as the tagName
+      # override above -- ref_name resolves to the branch on a manual workflow_dispatch run,
+      # and using it here would find no matching release/tag and delete every real one.
+      - name: Delete all other releases and tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          current_tag="v$(jq -r .version src-tauri/tauri.conf.json)"
+          echo "Current release to keep: $current_tag"
+
+          all_tags=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+
+          # Sanity check before deleting anything: if the tag we intend to keep isn't even in
+          # the list, something upstream is wrong (e.g. version extraction broke) -- abort
+          # rather than proceed to wipe out every existing release.
+          if ! grep -qx "$current_tag" <<< "$all_tags"; then
+            echo "::error::Current tag $current_tag not found among releases -- aborting cleanup to avoid deleting everything."
+            exit 1
+          fi
+
+          while IFS= read -r tag; do
+            if [ "$tag" != "$current_tag" ]; then
+              echo "Deleting old release+tag: $tag"
+              gh release delete "$tag" --cleanup-tag --yes
+            fi
+          done <<< "$all_tags"
