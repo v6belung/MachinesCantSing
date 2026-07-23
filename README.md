@@ -49,8 +49,7 @@ point.
     real artists, however obscure, are rarely invisible to both at once.
 - The tray icon has five states: gray (idle, nothing playing), an hourglass
   (checking), green (not flagged), amber (couldn't be confidently checked),
-  red (flagged). Hover it for the current track and status, or right-click
-  for more detail and an optional history window.
+  red (flagged). Hover it for the current track and status.
 - Right-click the tray icon and check "Start with Windows" if you want the
   app running automatically every time you log in — it's off by default.
 
