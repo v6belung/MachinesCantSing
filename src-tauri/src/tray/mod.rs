@@ -1,7 +1,8 @@
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::classifier::LOW_CONFIDENCE_MAX;
 use crate::media::NowPlayingChanged;
@@ -42,14 +43,17 @@ impl TrayState {
 const ITEM_CURRENT_TRACK: &str = "current-track";
 const ITEM_FLAGGED_STATUS: &str = "flagged-status";
 const ITEM_OPEN_WINDOW: &str = "open-window";
+const ITEM_AUTOSTART: &str = "autostart";
 const ITEM_QUIT: &str = "quit";
 
 /// The two label-only menu items get their text updated in place by `update()`. Kept in
 /// managed state rather than round-tripped through the tray's menu, since that's simpler
-/// and avoids re-deriving menu item identity every update.
+/// and avoids re-deriving menu item identity every update. `autostart` is kept here too so
+/// its checkbox can be flipped back to match reality if the registry write itself fails.
 struct TrayMenuItems {
     current_track: MenuItem<tauri::Wry>,
     flagged_status: MenuItem<tauri::Wry>,
+    autostart: CheckMenuItem<tauri::Wry>,
 }
 
 /// Tray icon + menu + tooltip setup (docs/phase0-plan.md §4.3). The tray is the *only*
@@ -71,6 +75,17 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
         true,
         None::<&str>,
     )?;
+    // Reflects the actual registry state at startup rather than assuming unchecked, so a
+    // toggle made outside this menu (or a prior install) still shows correctly.
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+    let autostart = CheckMenuItem::with_id(
+        app,
+        ITEM_AUTOSTART,
+        "Start with Windows",
+        true,
+        autostart_enabled,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, ITEM_QUIT, "Quit", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -80,6 +95,7 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
             &flagged_status,
             &PredefinedMenuItem::separator(app)?,
             &open_window,
+            &autostart,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -96,6 +112,7 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
                     let _ = window.set_focus();
                 }
             }
+            ITEM_AUTOSTART => toggle_autostart(app),
             ITEM_QUIT => app.exit(0),
             _ => {}
         })
@@ -104,9 +121,30 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
     app.manage(TrayMenuItems {
         current_track,
         flagged_status,
+        autostart,
     });
 
     Ok(())
+}
+
+/// Flips the actual autostart registration and, only on success, the checkbox to match --
+/// on failure the checkbox is left as-is (still reflecting reality) rather than showing a
+/// state the registry write didn't actually achieve.
+fn toggle_autostart(app: &AppHandle) {
+    let Some(items) = app.try_state::<TrayMenuItems>() else {
+        return;
+    };
+    let currently_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+    let result = if currently_enabled {
+        app.autolaunch().disable()
+    } else {
+        app.autolaunch().enable()
+    };
+    if let Err(err) = result {
+        log::warn!("failed to toggle start-with-Windows: {err:?}");
+        return;
+    }
+    let _ = items.autostart.set_checked(!currently_enabled);
 }
 
 /// Called by `media::MediaMonitor` whenever the now-playing state changes. Swaps the tray

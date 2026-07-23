@@ -55,5 +55,3 @@ private database of past verdicts lives on your machine at
 This is a deliberately rough heuristic stack, not a verdict on whether an
 artist is really AI-generated — treat a flag as "worth a second look," not
 as fact.
-
-Full technical design: [`docs/phase0-plan.md`](docs/phase0-plan.md).

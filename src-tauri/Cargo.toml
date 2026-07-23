@@ -25,5 +25,8 @@ windows-future = "0.3.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.18.0", features = ["tokio"] }
 
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+tauri-plugin-autostart = "2.5.1"
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = ["codegen"] }
