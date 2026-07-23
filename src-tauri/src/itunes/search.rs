@@ -46,6 +46,8 @@ struct ArtistResult {
     artist_id: Option<i64>,
     #[serde(rename = "artistName")]
     artist_name: Option<String>,
+    #[serde(rename = "artistType")]
+    artist_type: Option<String>,
 }
 
 /// Resolve an artist on iTunes, grounded in the track that's actually playing
@@ -96,9 +98,14 @@ async fn search_artist_name(
         urlencoding::encode(artist_name)
     );
     let resp: SearchResponse<ArtistResult> = client.get_json(&url).await?;
+    // entity=musicArtist isn't a watertight filter -- confirmed live that a same-named
+    // non-music entity (an Apple Books author) can still come back from this query, which
+    // would otherwise silently attach a wrong, unrelated iTunes id to this artist's
+    // permanent classification row. artistType == "Artist" is the actual guarantee.
     let best = resp.results.into_iter().find_map(|r| {
         let (id, name) = (r.artist_id?, r.artist_name?);
-        names_match(&name, artist_name).then_some((id, name))
+        (r.artist_type.as_deref() == Some("Artist") && names_match(&name, artist_name))
+            .then_some((id, name))
     });
     Ok(
         best.map(|(itunes_artist_id, matched_artist_name)| ArtistResolution {
