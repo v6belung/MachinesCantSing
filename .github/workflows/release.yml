@@ -26,8 +26,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Now Playing Flagger ${{ github.ref_name }}"
+          # __VERSION__ is substituted by tauri-action from the app's own version
+          # (tauri.conf.json/Cargo.toml). Deliberately NOT github.ref_name -- that
+          # resolves to the *branch* name on a manual workflow_dispatch run, not the
+          # pushed tag, which is what shipped a release literally named "master".
+          tagName: v__VERSION__
+          releaseName: "Now Playing Flagger v__VERSION__"
           releaseBody: "Windows build. Download the `.exe` installer below, run it, and look for the tray icon."
           releaseDraft: false
           prerelease: false
