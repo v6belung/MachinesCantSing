@@ -10,15 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "status",
-        "title": "Now Playing — AI-Artist Flagger",
-        "width": 420,
-        "height": 560,
-        "visible": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

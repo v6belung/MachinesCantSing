@@ -11,9 +11,6 @@
     "release": "node scripts/release.mjs",
     "check:deps": "node scripts/check-dep-age.mjs"
   },
-  "dependencies": {
-    "@tauri-apps/api": "^2"
-  },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "typescript": "^5",

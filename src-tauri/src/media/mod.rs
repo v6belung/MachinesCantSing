@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::classifier::{self, ClassifyRequest};
@@ -125,7 +125,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct ArtistFlag {
     pub artist_id: String,
     pub name: String,
@@ -137,14 +137,14 @@ pub struct ArtistFlag {
     pub confidence: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct NowPlayingChanged {
     pub track_title: String,
     pub artists: Vec<ArtistFlag>,
 }
 
 /// Owns the dedup PK check and the in-flight guard, drives the classifier pipeline for
-/// never-before-seen artists, and emits `now-playing-changed` (docs/phase0-plan.md §2.3, §4.1).
+/// never-before-seen artists, and keeps the tray icon updated (docs/phase0-plan.md §2.3, §4.1).
 pub struct MediaMonitor {
     app_handle: AppHandle,
     db: Arc<Db>,
@@ -169,10 +169,6 @@ impl MediaMonitor {
             last_state: Mutex::new(None),
             in_flight: Mutex::new(HashSet::new()),
         }
-    }
-
-    pub fn current_state(&self) -> Option<NowPlayingChanged> {
-        self.last_state.lock().unwrap().clone()
     }
 
     /// Starts the platform backend thread plus the async event-consumer task.
@@ -251,8 +247,8 @@ impl MediaMonitor {
     }
 
     /// Re-reads the just-classified artist's verdict from the DB and, if it's still part
-    /// of the currently-displayed track, patches it in and re-emits -- without clobbering
-    /// a track change that may have happened while classification was in flight.
+    /// of the currently-displayed track, patches it in and refreshes the tray -- without
+    /// clobbering a track change that may have happened while classification was in flight.
     fn apply_classification_result(&self, artist_id: &str) {
         let mut guard = self.last_state.lock().unwrap();
         let Some(state) = guard.as_mut() else {
@@ -286,6 +282,5 @@ impl MediaMonitor {
             );
         }
         tray::update(&self.app_handle, state.as_ref());
-        let _ = self.app_handle.emit("now-playing-changed", state);
     }
 }

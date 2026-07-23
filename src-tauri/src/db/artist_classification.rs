@@ -66,11 +66,3 @@ pub fn insert(conn: &Connection, row: &NewClassification) -> rusqlite::Result<()
     )?;
     Ok(())
 }
-
-pub fn recent(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<ArtistClassification>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM artist_classification ORDER BY classified_at DESC LIMIT ?1"
-    ))?;
-    let rows = stmt.query_map([limit], from_row)?;
-    rows.collect()
-}

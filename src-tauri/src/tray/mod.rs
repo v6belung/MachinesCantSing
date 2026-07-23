@@ -42,7 +42,6 @@ impl TrayState {
 
 const ITEM_CURRENT_TRACK: &str = "current-track";
 const ITEM_FLAGGED_STATUS: &str = "flagged-status";
-const ITEM_OPEN_WINDOW: &str = "open-window";
 const ITEM_AUTOSTART: &str = "autostart";
 const ITEM_QUIT: &str = "quit";
 
@@ -68,13 +67,6 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
         None::<&str>,
     )?;
     let flagged_status = MenuItem::with_id(app, ITEM_FLAGGED_STATUS, "", false, None::<&str>)?;
-    let open_window = MenuItem::with_id(
-        app,
-        ITEM_OPEN_WINDOW,
-        "Open status window",
-        true,
-        None::<&str>,
-    )?;
     // Reflects the actual registry state at startup rather than assuming unchecked, so a
     // toggle made outside this menu (or a prior install) still shows correctly.
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
@@ -94,7 +86,6 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
             &current_track,
             &flagged_status,
             &PredefinedMenuItem::separator(app)?,
-            &open_window,
             &autostart,
             &PredefinedMenuItem::separator(app)?,
             &quit,
@@ -106,12 +97,6 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
         .menu(&menu)
         .tooltip("Now Playing — AI-Artist Flagger: idle")
         .on_menu_event(|app, event| match event.id().as_ref() {
-            ITEM_OPEN_WINDOW => {
-                if let Some(window) = app.get_webview_window("status") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
             ITEM_AUTOSTART => toggle_autostart(app),
             ITEM_QUIT => app.exit(0),
             _ => {}

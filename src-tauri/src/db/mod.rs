@@ -35,11 +35,6 @@ impl Db {
         Ok(artist_classification::get(&conn, artist_id)?)
     }
 
-    pub fn recent_classifications(&self, limit: i64) -> anyhow::Result<Vec<ArtistClassification>> {
-        let conn = self.conn.lock().unwrap();
-        Ok(artist_classification::recent(&conn, limit)?)
-    }
-
     /// Single BEGIN/COMMIT over both tables (docs/phase0-plan.md §3.1 step 6) so a crash
     /// never leaves a classification row written without its evidence row, or vice versa.
     pub fn write_classification_with_evidence(

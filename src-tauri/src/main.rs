@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod classifier;
-mod commands;
 mod db;
 mod itunes;
 mod media;
@@ -17,11 +16,6 @@ use db::Db;
 use itunes::ItunesClient;
 use media::MediaMonitor;
 use musicbrainz::MusicBrainzClient;
-
-pub struct AppState {
-    pub db: Arc<Db>,
-    pub monitor: Arc<MediaMonitor>,
-}
 
 fn main() {
     tauri::Builder::default()
@@ -41,22 +35,16 @@ fn main() {
 
             let monitor = Arc::new(MediaMonitor::new(
                 app_handle.clone(),
-                db.clone(),
-                itunes.clone(),
-                musicbrainz.clone(),
+                db,
+                itunes,
+                musicbrainz,
             ));
-            monitor.clone().start();
+            monitor.start();
 
             tray::setup(&app_handle)?;
 
-            app.manage(AppState { db, monitor });
-
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            commands::get_current_state,
-            commands::get_recent_classifications,
-        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
