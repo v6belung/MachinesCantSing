@@ -5,6 +5,7 @@ use crate::db::artist_classification::NewClassification;
 use crate::db::classification_evidence::NewEvidence;
 use crate::itunes::search::MatchMethod;
 use crate::itunes::{ItunesClient, albums, search};
+use crate::musicbrainz::{self, MusicBrainzClient};
 use crate::text::normalize_artist_name;
 
 /// Credited-artist names that AI generators use as their own attribution when the uploader
@@ -64,18 +65,57 @@ fn is_release_burst(dates: &[NaiveDate]) -> bool {
     (latest - earliest).num_days() <= BURST_MAX_SPAN_DAYS
 }
 
+/// Title markers for the AI-cover-mashup convention observed across multiple confirmed-AI
+/// artists (e.g. "Hall of Fame (feat. Seraphina Rossi) [Female Version]", "Smack That - Female
+/// Version"). Discovered live: a farm can trivially manufacture "third-party corroboration" by
+/// cross-crediting its own synthetic personas as `(feat. ...)` on each other's tracks under this
+/// exact naming convention -- confirmed in practice via "Eiden Xii", whose own earliest release
+/// predates the flag window (an old, apparently legitimate release) but who now also credits
+/// several other AI personas as "feat." across dozens of Female/Rock Version singles. A credit
+/// under this convention doesn't count as real corroboration, regardless of how clean the
+/// crediting primary artist otherwise looks.
+const AI_COVER_MASHUP_TITLE_MARKERS: &[&str] = &[
+    "female version",
+    "rock version",
+    "but it hits hard",
+    "but it hits different",
+];
+
+fn looks_like_ai_cover_mashup_title(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    AI_COVER_MASHUP_TITLE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 /// True if any of the artist's iTunes collections is credited to a *different* primary artist
-/// name -- i.e. this artist shows up as a featured collaborator on someone else's release
-/// (e.g. "Fliegen (feat. Tiziano Guerzoni)" credited to "G Kollektiv"). A separate, real
-/// catalog choosing to credit them is much harder to fake cheaply than solo-published volume,
-/// so it's treated as strong evidence against "this is a synthetic persona."
+/// name under a title that doesn't match the AI-cover-mashup convention -- i.e. this artist
+/// shows up as a featured collaborator on someone else's ordinarily-titled release (e.g.
+/// "Fliegen (feat. Tiziano Guerzoni)" credited to "G Kollektiv"). A separate, real catalog
+/// choosing to credit them like this is much harder to fake cheaply than self-published volume,
+/// so it's treated as strong evidence against "this is a synthetic persona" -- unless the title
+/// itself is the tell (see `looks_like_ai_cover_mashup_title`).
 fn has_third_party_corroboration(artist_name: &str, entries: &[albums::AlbumEntry]) -> bool {
     let normalized = normalize_artist_name(artist_name);
     entries.iter().any(|e| {
-        e.artist_name
+        let different_primary_artist = e
+            .artist_name
             .as_deref()
-            .is_some_and(|name| normalize_artist_name(name) != normalized)
+            .is_some_and(|name| normalize_artist_name(name) != normalized);
+        let mashup_titled = e
+            .collection_name
+            .as_deref()
+            .is_some_and(looks_like_ai_cover_mashup_title);
+        different_primary_artist && !mashup_titled
     })
+}
+
+/// No confident match on iTunes *and* no match at all on MusicBrainz. A real artist, however
+/// obscure or new, is rarely invisible to both a commercial catalog and a community-edited one
+/// at once -- accepted trade-off: this also catches a genuinely new, tiny, real independent
+/// artist who hasn't been catalogued anywhere yet.
+fn is_invisible_everywhere(method: MatchMethod, mb_found: bool) -> bool {
+    matches!(method, MatchMethod::Unresolved) && !mb_found
 }
 
 /// The full §3 pipeline: resolve -> fetch albums -> earliest-date -> confidence -> dual-table
@@ -84,9 +124,14 @@ fn has_third_party_corroboration(artist_name: &str, entries: &[albums::AlbumEntr
 pub async fn classify(
     db: &Db,
     itunes: &ItunesClient,
+    musicbrainz: &MusicBrainzClient,
     req: ClassifyRequest,
 ) -> anyhow::Result<bool> {
     if is_ai_tool_denylisted(&req.artist_name) {
+        log::info!(
+            "scoring '{}': denylisted AI-tool name => is_flagged=true",
+            req.artist_name
+        );
         let now = Utc::now().to_rfc3339();
         let evidence = serde_json::json!({
             "denylisted_name": req.artist_name,
@@ -130,7 +175,7 @@ pub async fn classify(
         .map(|r| r.method)
         .unwrap_or(MatchMethod::Unresolved);
 
-    let (earliest, album_count, burst, corroborated) = match &resolution {
+    let (earliest, album_count, burst, itunes_corroborated) = match &resolution {
         Some(r) => match albums::fetch_albums(itunes, r.itunes_artist_id).await {
             Ok(entries) => {
                 let dates: Vec<NaiveDate> = entries.iter().map(|e| e.release_date).collect();
@@ -167,7 +212,49 @@ pub async fn classify(
     let new_artist = earliest
         .map(|d| matches!(d.year(), 2025 | 2026))
         .unwrap_or(false);
-    let is_flagged = (new_artist && !corroborated) || burst;
+    let itunes_unresolved = matches!(method, MatchMethod::Unresolved);
+
+    // Worth the extra MusicBrainz round-trip in two cases: iTunes would otherwise flag on
+    // recency alone and hasn't already corroborated it, or iTunes couldn't resolve the artist
+    // at all (checked here for the invisible-everywhere signal below). Keeps the one-time cost
+    // paid only where it can change the verdict.
+    let mb = if (new_artist && !itunes_corroborated) || itunes_unresolved {
+        match musicbrainz::lookup_corroboration(musicbrainz, &req.artist_name, &req.track_title)
+            .await
+        {
+            Ok(mb) => mb,
+            Err(err) => {
+                log::warn!(
+                    "MusicBrainz lookup failed for '{}': {err:?}",
+                    req.artist_name
+                );
+                musicbrainz::MbCorroboration::default()
+            }
+        }
+    } else {
+        musicbrainz::MbCorroboration::default()
+    };
+
+    let corroborated = itunes_corroborated || mb.any();
+    let invisible_everywhere = is_invisible_everywhere(method, mb.found);
+    let is_flagged = (new_artist && !corroborated) || burst || invisible_everywhere;
+
+    log::info!(
+        "scoring '{}': method={} confidence={:?} earliest={} album_count={} new_artist={} burst={} itunes_corroborated={} mb_found={} mb_life_span={} mb_external_links={} invisible_everywhere={} => is_flagged={}",
+        req.artist_name,
+        method.as_str(),
+        confidence,
+        earliest.map(|d| d.to_string()).as_deref().unwrap_or("none"),
+        album_count,
+        new_artist,
+        burst,
+        itunes_corroborated,
+        mb.found,
+        mb.has_life_span,
+        mb.has_external_links,
+        invisible_everywhere,
+        is_flagged,
+    );
 
     let now = Utc::now().to_rfc3339();
     let earliest_str = earliest.map(|d| d.to_string());
@@ -179,7 +266,11 @@ pub async fn classify(
         "album_count": album_count,
         "earliest_release_date": earliest_str,
         "release_burst": burst,
-        "third_party_corroboration": corroborated,
+        "itunes_feat_corroboration": itunes_corroborated,
+        "musicbrainz_found": mb.found,
+        "musicbrainz_life_span_corroboration": mb.has_life_span,
+        "musicbrainz_external_links_corroboration": mb.has_external_links,
+        "invisible_everywhere": invisible_everywhere,
         "queried_track_title": req.track_title,
     });
 
@@ -252,9 +343,18 @@ mod tests {
     }
 
     fn entry(release_date: &str, artist_name: Option<&str>) -> albums::AlbumEntry {
+        entry_titled(release_date, artist_name, "Some Song - Single")
+    }
+
+    fn entry_titled(
+        release_date: &str,
+        artist_name: Option<&str>,
+        collection_name: &str,
+    ) -> albums::AlbumEntry {
         albums::AlbumEntry {
             release_date: date(release_date),
             artist_name: artist_name.map(str::to_string),
+            collection_name: Some(collection_name.to_string()),
         }
     }
 
@@ -280,5 +380,85 @@ mod tests {
     fn not_corroborated_when_artist_name_is_missing() {
         let entries = vec![entry("2025-01-13", None)];
         assert!(!has_third_party_corroboration("Tiziano Guerzoni", &entries));
+    }
+
+    #[test]
+    fn not_corroborated_when_feat_credit_is_an_ai_cover_mashup_title() {
+        // The exact Seraphina Rossi / "Eiden Xii" case found live: a "feat." credit exists,
+        // but every one of them is titled with the AI-cover-mashup convention -- including the
+        // "(But It Hits Hard/Different)" variant that a first, narrower marker list missed.
+        let entries = vec![
+            entry_titled(
+                "2025-11-14",
+                Some("Eiden Xii"),
+                "Dark Horse (feat. Seraphina Rossi) [Rock Version] - Single",
+            ),
+            entry_titled(
+                "2026-01-16",
+                Some("Eiden Xii"),
+                "Hall of Fame (feat. Seraphina Rossi) [Female Version] - Single",
+            ),
+            entry_titled(
+                "2025-12-12",
+                Some("Eiden Xii"),
+                "Lovely (But It Hits Hard) [feat. Seraphina Rossi] - Single",
+            ),
+            entry_titled(
+                "2025-11-14",
+                Some("Angelina De Luca"),
+                "Little Do You Know (But it hits different) (feat. Seraphina Rossi) - Single",
+            ),
+        ];
+        assert!(!has_third_party_corroboration("Seraphina Rossi", &entries));
+    }
+
+    #[test]
+    fn corroborated_when_feat_credit_is_an_ordinary_title() {
+        let entries = vec![entry_titled(
+            "2026-05-01",
+            Some("G Kollektiv"),
+            "Fliegen (feat. Tiziano Guerzoni) - Single",
+        )];
+        assert!(has_third_party_corroboration("Tiziano Guerzoni", &entries));
+    }
+
+    #[test]
+    fn looks_like_ai_cover_mashup_title_matches_known_markers_case_insensitively() {
+        assert!(looks_like_ai_cover_mashup_title(
+            "Smack That - Female Version"
+        ));
+        assert!(looks_like_ai_cover_mashup_title(
+            "Hot N Cold (feat. X) [ROCK VERSION] - Single"
+        ));
+        assert!(!looks_like_ai_cover_mashup_title("Fliegen - Single"));
+    }
+
+    #[test]
+    fn mb_corroboration_any_is_true_if_either_signal_present() {
+        assert!(!musicbrainz::MbCorroboration::default().any());
+        assert!(
+            musicbrainz::MbCorroboration {
+                found: true,
+                has_life_span: true,
+                has_external_links: false,
+            }
+            .any()
+        );
+        assert!(
+            musicbrainz::MbCorroboration {
+                found: true,
+                has_life_span: false,
+                has_external_links: true,
+            }
+            .any()
+        );
+    }
+
+    #[test]
+    fn invisible_everywhere_requires_unresolved_and_no_musicbrainz_match() {
+        assert!(is_invisible_everywhere(MatchMethod::Unresolved, false));
+        assert!(!is_invisible_everywhere(MatchMethod::Unresolved, true));
+        assert!(!is_invisible_everywhere(MatchMethod::SongGrounded, false));
+        assert!(!is_invisible_everywhere(MatchMethod::ArtistName, false));
     }
 }

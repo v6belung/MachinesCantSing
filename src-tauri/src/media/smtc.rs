@@ -165,6 +165,15 @@ fn find_spotify_session(manager: &SessionManager) -> Option<Session> {
     None
 }
 
+/// SMTC's `Artist` is a single string, and Spotify doesn't reliably populate it with every
+/// credited artist even when its own UI shows several (confirmed live: a track credited to two
+/// artists in Spotify's UI arrived here as just the primary artist's name, nothing to split at
+/// all). Comma-splitting that string used to be attempted as a heuristic, but it couldn't fix
+/// that underlying gap -- it only ever helped on the subset of tracks where SMTC *did* happen
+/// to include everyone -- while still risking mangling a genuine single artist whose own name
+/// contains a comma into fake fragments that could then individually misresolve on iTunes. Not
+/// worth the risk for a heuristic that only partially covers the problem it targets; treat
+/// whatever SMTC hands us as one artist identity.
 fn read_now_playing(session: &Session) -> anyhow::Result<Option<RawNowPlaying>> {
     let playback_status = session.GetPlaybackInfo()?.PlaybackStatus()?;
     let status = match playback_status {
@@ -187,22 +196,8 @@ fn read_now_playing(session: &Session) -> anyhow::Result<Option<RawNowPlaying>> 
 
     Ok(Some(RawNowPlaying {
         track_title: title,
-        artist_names: split_artists(&artist),
+        artist_names: vec![artist.clone()],
         artist_credit: artist,
         playback_status: status,
     }))
-}
-
-/// Spotify's own SMTC formatting convention for multi-artist credits is a plain
-/// comma-separated list ("A, B, C") -- it does not use "&" as a delimiter, so splitting
-/// on that alone would mangle a real artist name containing one (e.g. "Earth, Wind &
-/// Fire" would become three fake artists). The whole-line candidate in
-/// `media::candidate_names` is the safety net for the comma case itself.
-fn split_artists(artist: &str) -> Vec<String> {
-    artist
-        .split(", ")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
 }

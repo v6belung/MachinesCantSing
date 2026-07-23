@@ -5,23 +5,24 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-/// iTunes allows ~20 req/min per IP; ~4s spacing keeps us safely under that (docs/phase0-plan.md §3.4).
-const MIN_SPACING: Duration = Duration::from_secs(4);
+/// MusicBrainz's API etiquette policy caps unauthenticated clients at one request per
+/// second; exceeding it risks an IP block (https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting).
+const MIN_SPACING: Duration = Duration::from_secs(1);
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_TRANSIENT_RETRIES: u32 = 5;
 const USER_AGENT: &str =
     "NowPlayingFlagger/0.1 (Phase1; +mailto:288729508+v6belung@users.noreply.github.com)";
 
-/// Global rate limiter for the iTunes Search API: a single-worker serial queue.
-/// The gate mutex is held for an item's *entire* processing — including any
-/// backoff sleeps — so a 403 pauses the whole queue, not just the current item,
-/// matching "back off ~60s, then resume the queue" in the plan.
-pub struct ItunesClient {
+/// Rate-limited client for the MusicBrainz API, mirroring `itunes::ItunesClient`'s
+/// single-worker serial queue -- MusicBrainz signals its rate limit with 503 rather than
+/// iTunes' 403, but the "back off, then resume the queue without dropping the request"
+/// shape is the same.
+pub struct MusicBrainzClient {
     http: reqwest::Client,
     gate: Mutex<Instant>,
 }
 
-impl ItunesClient {
+impl MusicBrainzClient {
     pub fn new() -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
@@ -51,9 +52,9 @@ impl ItunesClient {
         let result = loop {
             let sent = self.http.get(url).send().await;
             match sent {
-                Ok(resp) if resp.status() == StatusCode::FORBIDDEN => {
+                Ok(resp) if resp.status() == StatusCode::SERVICE_UNAVAILABLE => {
                     log::warn!(
-                        "iTunes API rate-limited (403); backing off {RATE_LIMIT_BACKOFF:?} before resuming queue"
+                        "MusicBrainz API rate-limited (503); backing off {RATE_LIMIT_BACKOFF:?} before resuming queue"
                     );
                     sleep(RATE_LIMIT_BACKOFF).await;
                     continue;
@@ -62,13 +63,13 @@ impl ItunesClient {
                     attempt += 1;
                     if attempt > MAX_TRANSIENT_RETRIES {
                         break Err(anyhow::anyhow!(
-                            "iTunes API persistent server error: {}",
+                            "MusicBrainz API persistent server error: {}",
                             resp.status()
                         ));
                     }
                     let backoff = transient_backoff(attempt);
                     log::warn!(
-                        "iTunes API server error {}; retrying in {backoff:?}",
+                        "MusicBrainz API server error {}; retrying in {backoff:?}",
                         resp.status()
                     );
                     sleep(backoff).await;
@@ -84,7 +85,7 @@ impl ItunesClient {
                         break Err(err.into());
                     }
                     let backoff = transient_backoff(attempt);
-                    log::warn!("iTunes API network error ({err}); retrying in {backoff:?}");
+                    log::warn!("MusicBrainz API network error ({err}); retrying in {backoff:?}");
                     sleep(backoff).await;
                     continue;
                 }
@@ -96,8 +97,8 @@ impl ItunesClient {
     }
 }
 
-/// Exponential backoff starting at 5s, capped at 60s (docs/phase0-plan.md §3.4).
+/// Exponential backoff starting at 5s, capped at 60s -- same shape as the iTunes client.
 fn transient_backoff(attempt: u32) -> Duration {
-    let exp = attempt.min(4) - 1; // caps growth before the Duration cap kicks in
+    let exp = attempt.min(4) - 1;
     Duration::from_secs(5 * (1u64 << exp)).min(RATE_LIMIT_BACKOFF)
 }

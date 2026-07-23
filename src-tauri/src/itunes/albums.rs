@@ -16,16 +16,22 @@ struct LookupEntry {
     release_date: Option<String>,
     #[serde(rename = "artistName")]
     artist_name: Option<String>,
+    #[serde(rename = "collectionName")]
+    collection_name: Option<String>,
 }
 
 /// One collection (album/single) credited to the looked-up artist. `artist_name` is that
 /// collection's own top-level credit, which iTunes sets to whoever the *primary* artist is --
 /// for a single where the looked-up artist only appears as a `(feat. ...)` credit, this is a
-/// different name (see `classifier::has_third_party_corroboration`).
+/// different name (see `classifier::has_third_party_corroboration`). `collection_name` is that
+/// single/album's own title, needed to recognize the AI-cover-mashup naming convention
+/// (`classifier::looks_like_ai_cover_mashup_title`) even when the crediting primary artist
+/// itself passes every other check.
 #[derive(Debug, Clone)]
 pub struct AlbumEntry {
     pub release_date: NaiveDate,
     pub artist_name: Option<String>,
+    pub collection_name: Option<String>,
 }
 
 /// Fetch every album/single for an iTunes artist id (docs/phase0-plan.md §3.1 step 3). The
@@ -48,6 +54,7 @@ pub async fn fetch_albums(
             Some(AlbumEntry {
                 release_date,
                 artist_name: e.artist_name,
+                collection_name: e.collection_name,
             })
         })
         .collect();

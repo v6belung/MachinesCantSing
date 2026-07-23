@@ -5,6 +5,7 @@ mod commands;
 mod db;
 mod itunes;
 mod media;
+mod musicbrainz;
 mod text;
 mod tray;
 
@@ -15,6 +16,7 @@ use tauri::Manager;
 use db::Db;
 use itunes::ItunesClient;
 use media::MediaMonitor;
+use musicbrainz::MusicBrainzClient;
 
 pub struct AppState {
     pub db: Arc<Db>,
@@ -31,11 +33,13 @@ fn main() {
             std::fs::create_dir_all(&data_dir)?;
             let db = Arc::new(Db::open(&data_dir.join("now-playing-flagger.sqlite3"))?);
             let itunes = Arc::new(ItunesClient::new()?);
+            let musicbrainz = Arc::new(MusicBrainzClient::new()?);
 
             let monitor = Arc::new(MediaMonitor::new(
                 app_handle.clone(),
                 db.clone(),
                 itunes.clone(),
+                musicbrainz.clone(),
             ));
             monitor.clone().start();
 

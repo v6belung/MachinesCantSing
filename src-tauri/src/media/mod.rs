@@ -13,6 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::classifier::{self, ClassifyRequest};
 use crate::db::Db;
 use crate::itunes::ItunesClient;
+use crate::musicbrainz::MusicBrainzClient;
 use crate::text::normalize_artist_name;
 use crate::tray;
 
@@ -29,12 +30,14 @@ pub enum PlaybackStatus {
 #[derive(Debug, Clone)]
 pub struct RawNowPlaying {
     pub track_title: String,
-    /// The raw, unsplit artist credit exactly as reported by the OS (e.g. "Earth, Wind &
-    /// Fire"). Evaluated as its own candidate alongside `artist_names` below, since splitting
-    /// is a heuristic that's wrong for any real artist whose name itself contains "," or "&".
+    /// The artist credit exactly as reported by the OS. On Windows/SMTC this is a single
+    /// string that isn't reliably split into per-artist fragments (see `smtc::read_now_playing`
+    /// for why guessing at a split was dropped); on Linux/MPRIS it's whatever the backend joins
+    /// `artist_names` from.
     pub artist_credit: String,
-    /// Best-effort split into individual artist names (heuristic on Windows/SMTC; native on
-    /// Linux/MPRIS, which reports artists as a structured list already).
+    /// Individual artist names, when the backend can actually provide them as a structured
+    /// list rather than a guess (native on Linux/MPRIS). On Windows/SMTC this is always just
+    /// `[artist_credit]` -- there's no separate splitting to do.
     pub artist_names: Vec<String>,
     // Part of the normalized event shape per docs/phase0-plan.md §2.1; Stopped is already
     // filtered to `None` by backends before this struct is built, so Playing vs Paused isn't
@@ -74,12 +77,12 @@ pub fn artist_id(artist_name: &str) -> String {
     format!("name:{}", normalize_artist_name(artist_name))
 }
 
-/// The names to classify for a track: the raw, unsplit credit line plus each individually
-/// split name, deduped by normalized identity. Evaluating both catches two different failure
-/// modes of the split heuristic -- a real artist whose name contains "," or "&" is still
-/// classified correctly under the whole-line entry even if the split mangles it, while a
-/// genuine collab still gets each participant classified individually. A track is flagged if
-/// *any* candidate resolves flagged (docs/phase0-plan.md's OR-across-candidates refinement).
+/// The names to classify for a track: the credit line plus any additional structured names a
+/// backend actually provided, deduped by normalized identity. On Windows/SMTC `artist_names` is
+/// always just `[artist_credit]`, so this collapses to one candidate; on a backend that can
+/// supply genuinely separate per-artist names (native MPRIS), each still gets classified
+/// individually and a track is flagged if *any* candidate resolves flagged
+/// (docs/phase0-plan.md's OR-across-candidates refinement).
 fn candidate_names(artist_credit: &str, artist_names: &[String]) -> Vec<String> {
     let mut candidates = Vec::with_capacity(artist_names.len() + 1);
     let mut seen = HashSet::new();
@@ -146,16 +149,23 @@ pub struct MediaMonitor {
     app_handle: AppHandle,
     db: Arc<Db>,
     itunes: Arc<ItunesClient>,
+    musicbrainz: Arc<MusicBrainzClient>,
     last_state: Mutex<Option<NowPlayingChanged>>,
     in_flight: Mutex<HashSet<String>>,
 }
 
 impl MediaMonitor {
-    pub fn new(app_handle: AppHandle, db: Arc<Db>, itunes: Arc<ItunesClient>) -> Self {
+    pub fn new(
+        app_handle: AppHandle,
+        db: Arc<Db>,
+        itunes: Arc<ItunesClient>,
+        musicbrainz: Arc<MusicBrainzClient>,
+    ) -> Self {
         Self {
             app_handle,
             db,
             itunes,
+            musicbrainz,
             last_state: Mutex::new(None),
             in_flight: Mutex::new(HashSet::new()),
         }
@@ -230,7 +240,9 @@ impl MediaMonitor {
         tauri::async_runtime::spawn(async move {
             let artist_id = req.artist_id.clone();
             let artist_name = req.artist_name.clone();
-            if let Err(err) = classifier::classify(&self.db, &self.itunes, req).await {
+            if let Err(err) =
+                classifier::classify(&self.db, &self.itunes, &self.musicbrainz, req).await
+            {
                 log::error!("classification failed for '{artist_name}': {err:?}");
             }
             self.clear_in_flight(&artist_id);

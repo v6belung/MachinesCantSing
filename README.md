@@ -1,8 +1,8 @@
 # Now Playing — AI-Artist Flagger
 
 A small Windows tray app that watches your local Spotify session and flags
-artists whose earliest release date falls in 2025/2026 — a rough proxy for
-"probably an AI-generated act." No login, no API keys, no Spotify account
+artists that look like AI-generated acts — new to streaming with no
+independent trace of being real. No login, no API keys, no Spotify account
 access of any kind.
 
 ## Install
@@ -29,20 +29,31 @@ point.
   (the same info that powers your media keys) — no Spotify login, no network
   call to Spotify at all.
 - The first time an artist is seen, their name is checked against the public
-  iTunes catalog for their earliest release date. If that's 2025 or 2026,
-  they're flagged. Every artist is checked only once, ever — the verdict is
-  permanent and reused on every later play.
-- The tray icon has four states: gray (idle, nothing playing), an hourglass
-  (checking), green (not flagged), red (flagged). Hover it for the current
-  track and status, or right-click for more detail and an optional history
-  window.
+  iTunes catalog and MusicBrainz. Every artist is checked only once, ever —
+  the verdict is permanent and reused on every later play. A few signals feed
+  into the verdict:
+  - An artist credited literally as "Suno" or "Udio" (some AI uploads never
+    get renamed) is an instant flag.
+  - An artist whose earliest release is from 2025/2026 is flagged *unless*
+    something corroborates them as real: a different, established artist
+    crediting them as a featured collaborator, or a MusicBrainz entry with a
+    documented life-span or external links (official site, socials,
+    Discogs, Songkick/Bandsintown/setlist.fm).
+  - A sudden burst of many releases in a short window is flagged regardless
+    of age — a real artist's catalog rarely appears all at once.
+  - An artist found on neither iTunes nor MusicBrainz at all is flagged —
+    real artists, however obscure, are rarely invisible to both at once.
+- The tray icon has five states: gray (idle, nothing playing), an hourglass
+  (checking), green (not flagged), amber (couldn't be confidently checked),
+  red (flagged). Hover it for the current track and status, or right-click
+  for more detail and an optional history window.
 
-Nothing is sent anywhere except those iTunes lookups. A local, private
-database of past verdicts lives on your machine at
+Nothing is sent anywhere except those iTunes/MusicBrainz lookups. A local,
+private database of past verdicts lives on your machine at
 `%APPDATA%\dev.v6belung.now-playing-flagger\`.
 
-This is a deliberately rough, placeholder heuristic, not a verdict on
-whether an artist is really AI-generated — treat a flag as "worth a second
-look," not as fact.
+This is a deliberately rough heuristic stack, not a verdict on whether an
+artist is really AI-generated — treat a flag as "worth a second look," not
+as fact.
 
 Full technical design: [`docs/phase0-plan.md`](docs/phase0-plan.md).
