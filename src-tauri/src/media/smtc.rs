@@ -199,5 +199,7 @@ fn read_now_playing(session: &Session) -> anyhow::Result<Option<RawNowPlaying>> 
         artist_names: vec![artist.clone()],
         artist_credit: artist,
         playback_status: status,
+        // SMTC doesn't expose Spotify's track ID, so no full-credits lookup on Windows.
+        spotify_track_id: None,
     }))
 }

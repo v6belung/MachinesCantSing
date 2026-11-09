@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::AppHandle;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::classifier::{self, ClassifyRequest};
 use crate::db::Db;
 use crate::itunes::ItunesClient;
 use crate::musicbrainz::MusicBrainzClient;
+use crate::spotify::SpotifyPageClient;
 use crate::text::normalize_artist_name;
 use crate::tray;
 
@@ -27,13 +28,13 @@ pub enum PlaybackStatus {
 
 /// The normalized event a platform backend emits. `None` means no active track
 /// (stopped/paused/no session) -- the tray goes idle (docs/phase0-plan.md §2.2).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RawNowPlaying {
     pub track_title: String,
     /// The artist credit exactly as reported by the OS. On Windows/SMTC this is a single
     /// string that isn't reliably split into per-artist fragments (see `smtc::read_now_playing`
-    /// for why guessing at a split was dropped); on Linux/MPRIS it's whatever the backend joins
-    /// `artist_names` from.
+    /// for why guessing at a split was dropped); on Linux/MPRIS it's the first listed artist,
+    /// never a synthetic join (see `mpris::to_snapshot` for why).
     pub artist_credit: String,
     /// Individual artist names, when the backend can actually provide them as a structured
     /// list rather than a guess (native on Linux/MPRIS). On Windows/SMTC this is always just
@@ -44,6 +45,9 @@ pub struct RawNowPlaying {
     // consumed downstream yet -- kept for backends/consumers that need the distinction later.
     #[allow(dead_code)]
     pub playback_status: PlaybackStatus,
+    /// Spotify's base62 track ID, when the OS exposes it (Linux/MPRIS; never on Windows/SMTC).
+    /// Lets `MediaMonitor` look up the track's full artist credits (see `crate::spotify`).
+    pub spotify_track_id: Option<String>,
 }
 
 pub type RawEventSender = UnboundedSender<Option<RawNowPlaying>>;
@@ -135,11 +139,15 @@ pub struct ArtistFlag {
     /// `is_flagged == Some(false)` with a low confidence means "unresolved on iTunes," not
     /// "confidently checked and clear" -- see `classifier::LOW_CONFIDENCE_MAX`.
     pub confidence: Option<f64>,
+    /// Plain-language lines explaining the verdict (see `classifier::explain`); empty while
+    /// pending or if the evidence couldn't be read.
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct NowPlayingChanged {
     pub track_title: String,
+    pub spotify_track_id: Option<String>,
     pub artists: Vec<ArtistFlag>,
 }
 
@@ -150,8 +158,15 @@ pub struct MediaMonitor {
     db: Arc<Db>,
     itunes: Arc<ItunesClient>,
     musicbrainz: Arc<MusicBrainzClient>,
+    spotify: Arc<SpotifyPageClient>,
     last_state: Mutex<Option<NowPlayingChanged>>,
     in_flight: Mutex<HashSet<String>>,
+    /// Track IDs whose Spotify page lookup failed or was untrustworthy this session -- not
+    /// retried until restart, so pause/resume (which re-emits the track) can't hammer the page.
+    track_lookup_failed: Mutex<HashSet<String>>,
+    /// Re-delivers a track once its full credits are cached; see `spawn_track_lookup`.
+    enriched_tx: UnboundedSender<RawNowPlaying>,
+    enriched_rx: Mutex<Option<UnboundedReceiver<RawNowPlaying>>>,
 }
 
 impl MediaMonitor {
@@ -160,14 +175,20 @@ impl MediaMonitor {
         db: Arc<Db>,
         itunes: Arc<ItunesClient>,
         musicbrainz: Arc<MusicBrainzClient>,
+        spotify: Arc<SpotifyPageClient>,
     ) -> Self {
+        let (enriched_tx, enriched_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             app_handle,
             db,
             itunes,
             musicbrainz,
+            spotify,
             last_state: Mutex::new(None),
             in_flight: Mutex::new(HashSet::new()),
+            track_lookup_failed: Mutex::new(HashSet::new()),
+            enriched_tx,
+            enriched_rx: Mutex::new(Some(enriched_rx)),
         }
     }
 
@@ -175,20 +196,57 @@ impl MediaMonitor {
     pub fn start(self: Arc<Self>) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         platform_backend().spawn(tx);
+        let mut enriched_rx = self
+            .enriched_rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("MediaMonitor::start called twice");
 
+        // One consumer for both sources, so events are handled strictly in order: an enriched
+        // re-delivery can never race a newer track change and overwrite it.
         tauri::async_runtime::spawn(async move {
-            while let Some(raw) = rx.recv().await {
-                self.clone().handle_raw_event(raw).await;
+            loop {
+                tokio::select! {
+                    raw = rx.recv() => match raw {
+                        Some(raw) => self.clone().handle_raw_event(raw).await,
+                        None => break,
+                    },
+                    Some(raw) = enriched_rx.recv() => {
+                        if self.is_current_track(&raw) {
+                            self.clone().handle_raw_event(Some(raw)).await;
+                        }
+                    }
+                }
             }
         });
     }
 
+    fn is_current_track(&self, raw: &RawNowPlaying) -> bool {
+        self.last_state.lock().unwrap().as_ref().is_some_and(|s| {
+            s.spotify_track_id.is_some() && s.spotify_track_id == raw.spotify_track_id
+        })
+    }
+
     async fn handle_raw_event(self: Arc<Self>, raw: Option<RawNowPlaying>) {
-        let Some(raw) = raw else {
+        let Some(mut raw) = raw else {
             *self.last_state.lock().unwrap() = None;
             self.emit_and_update_tray(None);
             return;
         };
+
+        if let Some(track_id) = raw.spotify_track_id.clone() {
+            match self.db.get_track_artists(&track_id) {
+                Ok(Some(names)) => raw.artist_names = names,
+                Ok(None) => {
+                    let failed = self.track_lookup_failed.lock().unwrap().contains(&track_id);
+                    if !failed && self.mark_in_flight(&format!("track:{track_id}")) {
+                        self.clone().spawn_track_lookup(raw.clone(), track_id);
+                    }
+                }
+                Err(err) => log::warn!("couldn't read cached credits for {track_id}: {err:?}"),
+            }
+        }
 
         let candidates = candidate_names(&raw.artist_credit, &raw.artist_names);
 
@@ -196,15 +254,20 @@ impl MediaMonitor {
         for name in &candidates {
             let id = artist_id(name);
             let known = self.db.get_classification(&id).ok().flatten();
-            let (is_flagged, confidence) = match &known {
-                Some(row) => (Some(row.is_flagged), row.confidence),
-                None => (None, None),
+            let (is_flagged, confidence, reasons) = match &known {
+                Some(row) => (
+                    Some(row.is_flagged),
+                    row.confidence,
+                    self.reasons(&id, row.is_flagged, row.confidence),
+                ),
+                None => (None, None, Vec::new()),
             };
             artists.push(ArtistFlag {
                 artist_id: id.clone(),
                 name: name.clone(),
                 is_flagged,
                 confidence,
+                reasons,
             });
 
             if is_flagged.is_none() && self.mark_in_flight(&id) {
@@ -218,10 +281,82 @@ impl MediaMonitor {
 
         let state = NowPlayingChanged {
             track_title: raw.track_title,
+            spotify_track_id: raw.spotify_track_id,
             artists,
         };
         *self.last_state.lock().unwrap() = Some(state.clone());
         self.emit_and_update_tray(Some(state));
+    }
+
+    fn reasons(&self, artist_id: &str, is_flagged: bool, confidence: Option<f64>) -> Vec<String> {
+        match self.db.get_latest_evidence(artist_id) {
+            Ok(Some((source, json))) => match serde_json::from_str(&json) {
+                Ok(evidence) => {
+                    classifier::explain::explain(&source, &evidence, is_flagged, confidence)
+                }
+                Err(err) => {
+                    log::warn!("unreadable evidence for {artist_id}: {err:?}");
+                    Vec::new()
+                }
+            },
+            Ok(None) => Vec::new(),
+            Err(err) => {
+                log::warn!("couldn't load evidence for {artist_id}: {err:?}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Fetches the track's full artist credits from its public Spotify page, caches them, and
+    /// re-delivers the track so the extra artists get classified and shown. The track is shown
+    /// (with the primary artist) immediately in the meantime; any failure just leaves it that way.
+    fn spawn_track_lookup(self: Arc<Self>, raw: RawNowPlaying, track_id: String) {
+        tauri::async_runtime::spawn(async move {
+            let primary = normalize_artist_name(&raw.artist_credit);
+            let names = match self.spotify.track_artists(&track_id).await {
+                // Sanity check that the page is about the track we think it is.
+                Ok(Some(names)) if names.iter().any(|n| normalize_artist_name(n) == primary) => {
+                    Some(names)
+                }
+                Ok(Some(names)) => {
+                    log::warn!(
+                        "Spotify page for {track_id} credits {names:?}, not '{}'; ignoring",
+                        raw.artist_credit
+                    );
+                    None
+                }
+                Ok(None) => {
+                    log::warn!("Spotify page for {track_id} had no trustworthy artist list");
+                    None
+                }
+                Err(err) => {
+                    log::warn!("Spotify page lookup failed for {track_id}: {err:?}");
+                    None
+                }
+            };
+
+            match names {
+                Some(names) => {
+                    if let Err(err) = self.db.put_track_artists(&track_id, &names) {
+                        log::warn!("couldn't cache credits for {track_id}: {err:?}");
+                        self.track_lookup_failed
+                            .lock()
+                            .unwrap()
+                            .insert(track_id.clone());
+                    } else if names.len() > 1 {
+                        log::info!("full credits for '{}': {names:?}", raw.track_title);
+                        let _ = self.enriched_tx.send(raw);
+                    }
+                }
+                None => {
+                    self.track_lookup_failed
+                        .lock()
+                        .unwrap()
+                        .insert(track_id.clone());
+                }
+            }
+            self.clear_in_flight(&format!("track:{track_id}"));
+        });
     }
 
     fn mark_in_flight(&self, id: &str) -> bool {
@@ -260,6 +395,7 @@ impl MediaMonitor {
         if let Ok(Some(row)) = self.db.get_classification(artist_id) {
             artist.is_flagged = Some(row.is_flagged);
             artist.confidence = row.confidence;
+            artist.reasons = self.reasons(artist_id, row.is_flagged, row.confidence);
         }
         let snapshot = Some(state.clone());
         drop(guard);

@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub struct NewEvidence<'a> {
     pub artist_id: &'a str,
@@ -21,4 +21,16 @@ pub fn insert(conn: &Connection, row: &NewEvidence) -> rusqlite::Result<()> {
         ],
     )?;
     Ok(())
+}
+
+/// The stored evidence behind an artist's verdict, as `(source, evidence JSON)`. Exactly one row
+/// is written per artist today; "latest" just keeps this well-defined if that ever changes.
+pub fn latest(conn: &Connection, artist_id: &str) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT source, result FROM classification_evidence
+         WHERE artist_id = ?1 ORDER BY id DESC LIMIT 1",
+        [artist_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
 }

@@ -5,6 +5,7 @@ mod db;
 mod itunes;
 mod media;
 mod musicbrainz;
+mod spotify;
 mod text;
 mod tray;
 
@@ -16,6 +17,7 @@ use db::Db;
 use itunes::ItunesClient;
 use media::MediaMonitor;
 use musicbrainz::MusicBrainzClient;
+use spotify::SpotifyPageClient;
 
 fn main() {
     tauri::Builder::default()
@@ -32,12 +34,14 @@ fn main() {
             let db = Arc::new(Db::open(&data_dir.join("now-playing-flagger.sqlite3"))?);
             let itunes = Arc::new(ItunesClient::new()?);
             let musicbrainz = Arc::new(MusicBrainzClient::new()?);
+            let spotify = Arc::new(SpotifyPageClient::new()?);
 
             let monitor = Arc::new(MediaMonitor::new(
                 app_handle.clone(),
                 db,
                 itunes,
                 musicbrainz,
+                spotify,
             ));
             monitor.start();
 

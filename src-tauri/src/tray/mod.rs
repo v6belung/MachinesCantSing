@@ -1,13 +1,16 @@
+use std::sync::Mutex;
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::classifier::LOW_CONFIDENCE_MAX;
-use crate::media::NowPlayingChanged;
+use crate::media::{ArtistFlag, NowPlayingChanged};
 
 const TRAY_ID: &str = "main";
+const IDLE_TOOLTIP: &str = "Now Playing — AI-Artist Flagger: idle";
 /// Nothing playing.
 const IDLE_ICON: &[u8] = include_bytes!("../../icons/tray-neutral.png");
 /// At least one candidate artist still classifying.
@@ -40,62 +43,36 @@ impl TrayState {
     }
 }
 
-const ITEM_CURRENT_TRACK: &str = "current-track";
-const ITEM_FLAGGED_STATUS: &str = "flagged-status";
 const ITEM_AUTOSTART: &str = "autostart";
 const ITEM_QUIT: &str = "quit";
 
-/// The two label-only menu items get their text updated in place by `update()`. Kept in
-/// managed state rather than round-tripped through the tray's menu, since that's simpler
-/// and avoids re-deriving menu item identity every update. `autostart` is kept here too so
-/// its checkbox can be flipped back to match reality if the registry write itself fails.
-struct TrayMenuItems {
-    current_track: MenuItem<tauri::Wry>,
-    flagged_status: MenuItem<tauri::Wry>,
-    autostart: CheckMenuItem<tauri::Wry>,
+/// Label for the autostart checkbox, named after what the OS itself calls it. On Linux the
+/// plugin writes an XDG `~/.config/autostart/*.desktop` entry, which runs at login.
+#[cfg(windows)]
+const AUTOSTART_LABEL: &str = "Start with Windows";
+#[cfg(not(windows))]
+const AUTOSTART_LABEL: &str = "Start on login";
+
+/// The menu is rebuilt from scratch on every update (its per-artist submenus come and go with
+/// the track), so the current autostart checkbox is tracked here for `toggle_autostart` to
+/// flip once the autostart write has actually succeeded.
+struct TrayMenuState {
+    autostart: Mutex<Option<CheckMenuItem<tauri::Wry>>>,
 }
 
 /// Tray icon + menu + tooltip setup (docs/phase0-plan.md §4.3). The tray is the *only*
 /// surface in Phase 1 -- no notifications, no overlay. Left-click-to-open-menu is
 /// unsupported on Linux, so all info lives in the standard right-click menu.
 pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
-    let current_track = MenuItem::with_id(
-        app,
-        ITEM_CURRENT_TRACK,
-        "Nothing playing",
-        false,
-        None::<&str>,
-    )?;
-    let flagged_status = MenuItem::with_id(app, ITEM_FLAGGED_STATUS, "", false, None::<&str>)?;
-    // Reflects the actual registry state at startup rather than assuming unchecked, so a
-    // toggle made outside this menu (or a prior install) still shows correctly.
-    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
-    let autostart = CheckMenuItem::with_id(
-        app,
-        ITEM_AUTOSTART,
-        "Start with Windows",
-        true,
-        autostart_enabled,
-        None::<&str>,
-    )?;
-    let quit = MenuItem::with_id(app, ITEM_QUIT, "Quit", true, None::<&str>)?;
-
-    let menu = Menu::with_items(
-        app,
-        &[
-            &current_track,
-            &flagged_status,
-            &PredefinedMenuItem::separator(app)?,
-            &autostart,
-            &PredefinedMenuItem::separator(app)?,
-            &quit,
-        ],
-    )?;
+    app.manage(TrayMenuState {
+        autostart: Mutex::new(None),
+    });
+    let menu = build_menu(app, None)?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(Image::from_bytes(IDLE_ICON)?)
         .menu(&menu)
-        .tooltip("Now Playing — AI-Artist Flagger: idle")
+        .tooltip(IDLE_TOOLTIP)
         .on_menu_event(|app, event| match event.id().as_ref() {
             ITEM_AUTOSTART => toggle_autostart(app),
             ITEM_QUIT => app.exit(0),
@@ -103,22 +80,105 @@ pub fn setup(app: &AppHandle) -> anyhow::Result<()> {
         })
         .build(app)?;
 
-    app.manage(TrayMenuItems {
-        current_track,
-        flagged_status,
-        autostart,
-    });
-
     Ok(())
+}
+
+/// Builds the whole menu for the given now-playing state:
+///
+/// ```text
+/// Track — Artist A, Artist B        (label)
+/// Flagged: possible AI artist       (label)
+/// ─────
+/// Artist A: Flagged             ▸   per-signal explanation lines (classifier::explain)
+/// Artist B: Not flagged         ▸
+/// ─────
+/// [x] Start on login / Start with Windows
+/// ─────
+/// Quit
+/// ```
+fn build_menu(
+    app: &AppHandle,
+    state: Option<&NowPlayingChanged>,
+) -> tauri::Result<Menu<tauri::Wry>> {
+    let (track_text, status_text, _, _) = summarize(state);
+    let menu = Menu::new(app)?;
+
+    menu.append(&MenuItem::new(
+        app,
+        menu_text(&track_text),
+        false,
+        None::<&str>,
+    )?)?;
+    if !status_text.is_empty() {
+        menu.append(&MenuItem::new(app, status_text, false, None::<&str>)?)?;
+    }
+
+    if let Some(state) = state.filter(|s| !s.artists.is_empty()) {
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        for artist in &state.artists {
+            let label = menu_text(&format!("{}: {}", artist.name, artist_status(artist)));
+            if artist.reasons.is_empty() {
+                menu.append(&MenuItem::new(app, label, false, None::<&str>)?)?;
+            } else {
+                let submenu = Submenu::new(app, label, true)?;
+                for line in &artist.reasons {
+                    // Enabled (but inert) so the text renders at full contrast rather than
+                    // grayed out -- these lines are the point of the submenu.
+                    submenu.append(&MenuItem::new(app, menu_text(line), true, None::<&str>)?)?;
+                }
+                menu.append(&submenu)?;
+            }
+        }
+    }
+
+    // Reflects the actual autostart state (registry on Windows, XDG autostart entry on Linux)
+    // rather than assuming unchecked, so a toggle made outside this menu still shows correctly.
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+    let autostart = CheckMenuItem::with_id(
+        app,
+        ITEM_AUTOSTART,
+        AUTOSTART_LABEL,
+        true,
+        autostart_enabled,
+        None::<&str>,
+    )?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&autostart)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        ITEM_QUIT,
+        "Quit",
+        true,
+        None::<&str>,
+    )?)?;
+
+    if let Some(menu_state) = app.try_state::<TrayMenuState>() {
+        *menu_state.autostart.lock().unwrap() = Some(autostart);
+    }
+    Ok(menu)
+}
+
+fn artist_status(artist: &ArtistFlag) -> &'static str {
+    match artist.is_flagged {
+        None => "Checking…",
+        Some(true) => "Flagged",
+        Some(false) if artist.confidence.is_some_and(|c| c <= LOW_CONFIDENCE_MAX) => "Uncertain",
+        Some(false) => "Not flagged",
+    }
+}
+
+/// Menu labels treat a single `&` as a keyboard-mnemonic marker on every platform (muda maps
+/// it to Windows' native `&` / GTK's `_`) and swallow it, which used to turn "Earth, Wind &
+/// Fire" into "Earth, Wind  Fire". `&&` renders as a literal `&`.
+fn menu_text(text: &str) -> String {
+    text.replace('&', "&&")
 }
 
 /// Flips the actual autostart registration and, only on success, the checkbox to match --
 /// on failure the checkbox is left as-is (still reflecting reality) rather than showing a
-/// state the registry write didn't actually achieve.
+/// state the autostart write didn't actually achieve.
 fn toggle_autostart(app: &AppHandle) {
-    let Some(items) = app.try_state::<TrayMenuItems>() else {
-        return;
-    };
     let currently_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let result = if currently_enabled {
         app.autolaunch().disable()
@@ -126,30 +186,38 @@ fn toggle_autostart(app: &AppHandle) {
         app.autolaunch().enable()
     };
     if let Err(err) = result {
-        log::warn!("failed to toggle start-with-Windows: {err:?}");
+        log::warn!("failed to toggle autostart: {err:?}");
         return;
     }
-    let _ = items.autostart.set_checked(!currently_enabled);
+    if let Some(menu_state) = app.try_state::<TrayMenuState>()
+        && let Some(item) = menu_state.autostart.lock().unwrap().as_ref()
+    {
+        let _ = item.set_checked(!currently_enabled);
+    }
 }
 
 /// Called by `media::MediaMonitor` whenever the now-playing state changes. Swaps the tray
 /// icon between idle/pending/clear/flagged/unresolved -- that swap *is* the flagged signal
-/// (docs/phase0-plan.md §4.3) -- and refreshes the tooltip and the two label-only menu items.
+/// (docs/phase0-plan.md §4.3) -- and refreshes the tooltip and the menu.
 pub fn update(app: &AppHandle, state: Option<&NowPlayingChanged>) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
 
-    let (track_text, status_text, tooltip, tray_state) = summarize(state);
+    let (_, _, tooltip, tray_state) = summarize(state);
 
+    // On Linux this sets the AppIndicator title instead (see vendor/tray-icon/PATCHED.md),
+    // which Cinnamon and similar desktops show on hover.
     let _ = tray.set_tooltip(Some(tooltip.as_str()));
     if let Ok(image) = Image::from_bytes(tray_state.icon_bytes()) {
         let _ = tray.set_icon(Some(image));
     }
 
-    if let Some(items) = app.try_state::<TrayMenuItems>() {
-        let _ = items.current_track.set_text(track_text);
-        let _ = items.flagged_status.set_text(status_text);
+    match build_menu(app, state) {
+        Ok(menu) => {
+            let _ = tray.set_menu(Some(menu));
+        }
+        Err(err) => log::warn!("failed to rebuild tray menu: {err:?}"),
     }
 }
 
@@ -158,7 +226,7 @@ fn summarize(state: Option<&NowPlayingChanged>) -> (String, String, String, Tray
         return (
             "Nothing playing".to_string(),
             String::new(),
-            "Now Playing — AI-Artist Flagger: idle".to_string(),
+            IDLE_TOOLTIP.to_string(),
             TrayState::Idle,
         );
     };
@@ -238,7 +306,6 @@ fn build_tooltip(track_text: &str, status_text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::ArtistFlag;
 
     fn artist(is_flagged: Option<bool>, confidence: Option<f64>) -> ArtistFlag {
         ArtistFlag {
@@ -246,12 +313,14 @@ mod tests {
             name: "Test".to_string(),
             is_flagged,
             confidence,
+            reasons: Vec::new(),
         }
     }
 
     fn state(artists: Vec<ArtistFlag>) -> NowPlayingChanged {
         NowPlayingChanged {
             track_title: "Song".to_string(),
+            spotify_track_id: None,
             artists,
         }
     }
@@ -290,6 +359,22 @@ mod tests {
         ]);
         let (_, _, _, tray_state) = summarize(Some(&s));
         assert_eq!(tray_state, TrayState::Pending);
+    }
+
+    #[test]
+    fn menu_text_keeps_ampersands_literal() {
+        assert_eq!(menu_text("Earth, Wind & Fire"), "Earth, Wind && Fire");
+    }
+
+    #[test]
+    fn artist_status_labels() {
+        assert_eq!(artist_status(&artist(None, None)), "Checking…");
+        assert_eq!(artist_status(&artist(Some(true), Some(1.0))), "Flagged");
+        assert_eq!(artist_status(&artist(Some(false), Some(0.2))), "Uncertain");
+        assert_eq!(
+            artist_status(&artist(Some(false), Some(1.0))),
+            "Not flagged"
+        );
     }
 
     #[test]

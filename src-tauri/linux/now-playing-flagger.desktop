@@ -1,0 +1,11 @@
+[Desktop Entry]
+Categories={{categories}}
+Comment={{comment}}
+Exec={{exec}}
+StartupWMClass={{exec}}
+Icon={{icon}}
+Name=Now Playing Flagger
+GenericName=AI-Artist Flagger
+Keywords=spotify;music;ai;
+Terminal=false
+Type=Application

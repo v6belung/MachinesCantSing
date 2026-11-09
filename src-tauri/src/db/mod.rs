@@ -1,5 +1,6 @@
 pub mod artist_classification;
 pub mod classification_evidence;
+pub mod track_artists;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -9,8 +10,13 @@ use rusqlite::Connection;
 use artist_classification::{ArtistClassification, NewClassification};
 use classification_evidence::NewEvidence;
 
-const MIGRATIONS: &[(&str, &str)] =
-    &[("0001_init", include_str!("../../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init", include_str!("../../migrations/0001_init.sql")),
+    (
+        "0002_track_artists",
+        include_str!("../../migrations/0002_track_artists.sql"),
+    ),
+];
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -33,6 +39,26 @@ impl Db {
     ) -> anyhow::Result<Option<ArtistClassification>> {
         let conn = self.conn.lock().unwrap();
         Ok(artist_classification::get(&conn, artist_id)?)
+    }
+
+    pub fn get_latest_evidence(&self, artist_id: &str) -> anyhow::Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(classification_evidence::latest(&conn, artist_id)?)
+    }
+
+    pub fn get_track_artists(&self, track_id: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let conn = self.conn.lock().unwrap();
+        track_artists::get(&conn, track_id)
+    }
+
+    pub fn put_track_artists(&self, track_id: &str, artist_names: &[String]) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        track_artists::insert(
+            &conn,
+            track_id,
+            artist_names,
+            &chrono::Utc::now().to_rfc3339(),
+        )
     }
 
     /// Single BEGIN/COMMIT over both tables (docs/phase0-plan.md §3.1 step 6) so a crash

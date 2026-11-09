@@ -1,3 +1,5 @@
+pub mod explain;
+
 use chrono::{NaiveDate, Utc};
 
 use crate::db::Db;
@@ -245,7 +247,8 @@ pub async fn classify(
     // recency alone and hasn't already corroborated it, or iTunes couldn't resolve the artist
     // at all (checked here for the invisible-everywhere signal below). Keeps the one-time cost
     // paid only where it can change the verdict.
-    let mb = if (new_artist && !itunes_corroborated) || itunes_unresolved {
+    let mb_checked = (new_artist && !itunes_corroborated) || itunes_unresolved;
+    let mb = if mb_checked {
         match musicbrainz::lookup_corroboration(musicbrainz, &req.artist_name, &req.track_title)
             .await
         {
@@ -292,8 +295,10 @@ pub async fn classify(
         "match_method": method.as_str(),
         "album_count": album_count,
         "earliest_release_date": earliest_str,
+        "new_artist": new_artist,
         "release_burst": burst,
         "itunes_feat_corroboration": itunes_corroborated,
+        "musicbrainz_checked": mb_checked,
         "musicbrainz_found": mb.found,
         "musicbrainz_life_span_corroboration": mb.has_life_span,
         "musicbrainz_external_links_corroboration": mb.has_external_links,
