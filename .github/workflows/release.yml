@@ -6,49 +6,117 @@ on:
       - "v*.*.*"
   workflow_dispatch:
 
+# Flow: create a *draft* release -> build every platform into it in parallel -> publish only
+# once all builds succeeded -> delete older releases. A failed platform build therefore never
+# leaves a public release with half its downloads missing; the draft just sits unpublished.
+#
+# The version always comes from src-tauri/tauri.conf.json, never github.ref_name: on a manual
+# workflow_dispatch run ref_name resolves to the *branch*, which once shipped a release
+# literally named "master" (and would make the cleanup below find no matching release and
+# delete every real one).
+
 jobs:
-  release:
-    runs-on: windows-latest
+  create-release:
+    runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+      tag: ${{ steps.create.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
+      - id: create
+        name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version src-tauri/tauri.conf.json)"
+          tag="v$version"
+
+          # A previous failed run may have left a draft for this tag. Drafts were never public,
+          # so it's safe to replace them; leaving one would trip the cleanup's end-state check.
+          stale=$(gh release list --limit 100 --json tagName,isDraft \
+            --jq ".[] | select(.isDraft and .tagName == \"$tag\") | .tagName")
+          if [ -n "$stale" ]; then
+            echo "Deleting stale draft release(s) for $tag"
+            gh release delete "$tag" --yes || true
+          fi
+
+          release_id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$tag" \
+            -f target_commitish="$GITHUB_SHA" \
+            -f name="Now Playing Flagger $tag" \
+            -f body="Windows: download the \`.exe\` installer. Debian/Ubuntu/Mint: the \`.deb\`. Other Linux: the \`.AppImage\`. Then look for the tray icon." \
+            -F draft=true \
+            --jq .id)
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+          # 22.04 rather than latest: an older glibc baseline means the .deb/AppImage also run
+          # on older distros (e.g. Mint 21), not just ones as new as the build machine.
+          - platform: ubuntu-22.04
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - uses: dtolnay/rust-toolchain@stable
 
       - run: npm ci
 
+      # Bundle targets per platform come from tauri.conf.json (Windows: nsis) and
+      # tauri.linux.conf.json (deb + appimage), which Tauri merges in automatically on Linux.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # __VERSION__ is substituted by tauri-action from the app's own version
-          # (tauri.conf.json/Cargo.toml). Deliberately NOT github.ref_name -- that
-          # resolves to the *branch* name on a manual workflow_dispatch run, not the
-          # pushed tag, which is what shipped a release literally named "master".
-          tagName: v__VERSION__
-          releaseName: "Now Playing Flagger v__VERSION__"
-          releaseBody: "Windows build. Download the `.exe` installer below, run it, and look for the tray icon."
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
 
-      # Keeps exactly one release/tag around: the one this run just published. Runs only if
-      # the step above succeeded (the default for a GitHub Actions job), so there's never a
-      # window where cleanup runs but no new release exists. Deliberately reads the version
-      # from tauri.conf.json rather than github.ref_name, for the same reason as the tagName
-      # override above -- ref_name resolves to the branch on a manual workflow_dispatch run,
-      # and using it here would find no matching release/tag and delete every real one.
+  publish:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ needs.create-release.outputs.tag }}" --draft=false
+
+      # Keeps exactly one release/tag around: the one this run just published. Only runs once
+      # every build succeeded and the release is public, so there's never a window where
+      # cleanup runs but no new release exists.
       - name: Delete all other releases and tags
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          current_tag="v$(jq -r .version src-tauri/tauri.conf.json)"
+          current_tag="${{ needs.create-release.outputs.tag }}"
           echo "Current release to keep: $current_tag"
 
           all_tags=$(gh release list --limit 100 --json tagName --jq '.[].tagName')

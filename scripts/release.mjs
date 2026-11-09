@@ -3,7 +3,7 @@
 // together (they must stay in sync -- Tauri reads its version from tauri.conf.json, not
 // Cargo.toml), refreshes Cargo.lock, and creates a release commit + git tag. Pushing the
 // tag (`git push origin vX.Y.Z`) triggers .github/workflows/release.yml, which builds the
-// Windows installer/binary and attaches it to a GitHub Release.
+// Windows installer and Linux .deb/AppImage and publishes them together as a GitHub Release.
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
