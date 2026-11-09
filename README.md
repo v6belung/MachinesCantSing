@@ -5,13 +5,18 @@ AI-generated. No login, no API keys, no Spotify account access.
 
 ## Install
 
-Download from [Releases](https://github.com/v6belung/MachinesCantSing/releases/latest):
+**Linux:**
 
-- **Windows 11:** run the `.exe` installer. It's unsigned, so SmartScreen may warn: click
-  "More info" → "Run anyway".
-- **Debian, Ubuntu, Mint:** `sudo apt install ./now-playing-flagger_*.deb`, then launch
-  "Now Playing Flagger" from your app menu.
-- **Other Linux:** make the `.AppImage` executable (`chmod +x`) and run it.
+```sh
+curl -fsSLO https://raw.githubusercontent.com/v6belung/MachinesCantSing/master/install.sh
+bash install.sh
+```
+
+Run it again to update; `bash install.sh --uninstall` removes it.
+
+**Windows 11:** run the `.exe` installer from
+[Releases](https://github.com/v6belung/MachinesCantSing/releases/latest). It's unsigned, so
+SmartScreen may warn: click "More info" → "Run anyway".
 
 Then play something in the Spotify desktop app (not the web player). The tray icon updates
 once the artist has been checked.
