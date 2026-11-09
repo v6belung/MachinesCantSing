@@ -1,66 +1,79 @@
 # Now Playing — AI-Artist Flagger
 
-A small Windows tray app that watches your local Spotify session and flags
-artists that look like AI-generated acts — new to streaming with no
-independent trace of being real. No login, no API keys, no Spotify account
-access of any kind.
+A small tray app that watches what you're playing in Spotify and flags artists that look
+AI-generated. No login, no API keys, no Spotify account access.
 
 ## Install
 
-1. Go to [Releases](https://github.com/v6belung/MachinesCantSing/releases/latest)
-   and download the `.exe` installer for the latest version.
-2. Run it. It installs the app and starts it — look for the icon in your
-   system tray (it may be hidden in the overflow arrow the first time; drag
-   it onto the visible taskbar to keep it there).
-3. Open Spotify (the native desktop app, not the web player) and play
-   something. The icon updates once the currently playing artist has been
-   classified.
+Download from [Releases](https://github.com/v6belung/MachinesCantSing/releases/latest):
 
-The installer is unsigned, so Windows SmartScreen may warn on first run —
-click "More info" → "Run anyway".
+- **Windows 11:** run the `.exe` installer. It's unsigned, so SmartScreen may warn: click
+  "More info" → "Run anyway".
+- **Debian, Ubuntu, Mint:** `sudo apt install ./now-playing-flagger_*.deb`, then launch
+  "Now Playing Flagger" from your app menu.
+- **Other Linux:** make the `.AppImage` executable (`chmod +x`) and run it.
 
-**Requirements:** Windows 11, with the native Spotify desktop app installed
-and running. No accounts, API keys, or `.env` files to set up — that's the
-point.
+Then play something in the Spotify desktop app (not the web player). The tray icon updates
+once the artist has been checked.
+
+## Reading the icon
+
+| Icon | Meaning |
+| --- | --- |
+| Gray | Nothing playing |
+| Hourglass | Checking the artist |
+| Green | Not flagged |
+| Amber | Couldn't be checked confidently |
+| Red | Flagged as a possible AI artist |
+
+Hover the icon for the current track. Right-click it to see each artist's verdict; open an
+artist's submenu to see what led to it (✗ points toward AI, ✓ away from it). The menu also has
+a start-on-login option.
 
 ## How it works
 
-- Now-playing comes straight from Windows' System Media Transport Controls
-  (the same info that powers your media keys) — no Spotify login, no network
-  call to Spotify at all.
-- The first time an artist is seen, their name is checked against the public
-  iTunes catalog and MusicBrainz. Every artist is checked only once, ever —
-  the verdict is permanent and reused on every later play. A few signals feed
-  into the verdict:
-  - An artist credited literally as "Suno" or "Udio" (some AI uploads never
-    get renamed) is an instant flag.
-  - An artist whose earliest release falls after March 2024 (roughly when AI
-    music tools got good enough to matter) still looks suspiciously new and
-    is flagged *unless* something corroborates them as real: a different,
-    established artist crediting them as a featured collaborator, or a
-    MusicBrainz entry with a documented life-span or external links
-    (official site, socials, Discogs, Songkick/Bandsintown/setlist.fm). This
-    doesn't fade with age — since every artist is checked only once, ever,
-    there's no later re-check for it to fade *during*.
-  - A sudden burst of many releases in a short window is flagged regardless
-    of age — a real artist's catalog rarely appears all at once.
-  - An artist found on neither iTunes nor MusicBrainz at all is flagged —
-    real artists, however obscure, are rarely invisible to both at once.
-- The tray icon has five states: gray (idle, nothing playing), an hourglass
-  (checking), green (not flagged), amber (couldn't be confidently checked),
-  red (flagged). Hover it for the current track and status.
-- Right-click the tray icon and check "Start with Windows" if you want the
-  app running automatically every time you log in — it's off by default.
+The current track comes from your OS's media controls, the same source your media keys use.
+Each new artist is checked once against the public iTunes and MusicBrainz catalogs, and the
+verdict is kept. An artist is flagged when:
 
-Nothing is sent anywhere except those iTunes/MusicBrainz lookups. A local,
-private database of past verdicts lives on your machine at
-`%APPDATA%\dev.v6belung.now-playing-flagger\`. Verdicts are permanent by
-design (an artist is only ever checked once), so if the app's detection
-logic improves in a later update, previously-seen artists keep their old
-verdict rather than getting re-checked automatically. To force everyone to
-be re-evaluated from scratch, close the app and delete that folder (or just
-the `.sqlite3` file inside it) before relaunching.
+- their first release came after March 2024 (when AI music tools got convincing) and nothing
+  independent vouches for them, such as another established artist featuring them or a
+  documented MusicBrainz entry;
+- many releases appeared all at once; or
+- neither catalog has heard of them.
 
-This is a deliberately rough heuristic stack, not a verdict on whether an
-artist is really AI-generated — treat a flag as "worth a second look," not
-as fact.
+On Linux, the app also reads the track's public Spotify page to get the full list of artists,
+since Spotify only reports the main artist to the OS.
+
+Treat a flag as "worth a second look", not as proof.
+
+## Privacy
+
+The only network requests are the iTunes, MusicBrainz and (on Linux) Spotify page lookups
+above. Nothing about you is sent anywhere. Past verdicts are stored locally:
+
+- Windows: `%APPDATA%\dev.v6belung.now-playing-flagger\`
+- Linux: `~/.local/share/dev.v6belung.now-playing-flagger/`
+
+Verdicts are permanent, so improvements in later versions don't re-check artists you've
+already heard. To start fresh, quit the app and delete that folder.
+
+## Building from source
+
+Needs [Rust](https://rustup.rs) and Node 22+. On Linux, also install the Tauri system
+libraries (Debian/Ubuntu/Mint):
+
+```sh
+sudo apt install build-essential libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+```
+
+Then:
+
+```sh
+npm ci
+npm run tauri dev      # run it
+npm run tauri build    # build an installer
+```
+
+On GNOME, tray icons need the AppIndicator extension. Cinnamon, KDE and XFCE show them out of
+the box.
